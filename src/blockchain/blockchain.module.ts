@@ -1,4 +1,20 @@
 import { Module, OnModuleInit } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+
+// Schemas
+import { ChainConfig, ChainConfigSchema } from './schemas/chain-config.schema';
+import {
+  ContractData,
+  ContractDataSchema,
+} from './schemas/contract-data.schema';
+import {
+  BlockchainEvent,
+  BlockchainEventSchema,
+} from './schemas/blockchain-event.schema';
+import {
+  ContractConfig,
+  ContractConfigSchema,
+} from './schemas/contract-config.schema';
 
 // Core services
 import { BlockchainConfigService } from './config/blockchain.config';
@@ -7,29 +23,59 @@ import { EventDispatcherService } from './core/event-dispatcher.service';
 import { ListenerFactoryService } from './core/listener-factory.service';
 import { BlockchainService } from './blockchain.service';
 
+// Database services
+import { ChainConfigService } from './services/chain-config.service';
+import { ContractDataService } from './services/contract-data.service';
+import { ContractConfigService } from './services/contract-config.service';
+
+// Seeders
+import { ChainConfigSeeder } from './seeders/chain-config.seeder';
+import { ContractConfigSeeder } from './seeders/contract-config.seeder';
+
 // Blockchain specific modules
 import { EvmModule } from './evm/evm.module';
 import { EvmSdkService } from './evm/evm-sdk.service';
 
 // Event handlers
-import { TokenDistributorHandler } from './handlers/token-distributor.handler';
+import { ERC20TransferHandler } from './handlers/erc20-transfer.handler';
 
 // Interfaces
 import { ChainType } from './interfaces/blockchain.interface';
 
 @Module({
   imports: [
+    MongooseModule.forFeature([
+      { name: ChainConfig.name, schema: ChainConfigSchema },
+      { name: ContractData.name, schema: ContractDataSchema },
+      { name: BlockchainEvent.name, schema: BlockchainEventSchema },
+      { name: ContractConfig.name, schema: ContractConfigSchema },
+    ]),
     EvmModule,
   ],
   providers: [
+    // Database services
+    ChainConfigService,
+    ContractDataService,
+    ContractConfigService,
+    ChainConfigSeeder,
+    ContractConfigSeeder,
+
+    // Core services
     BlockchainConfigService,
     SdkRegistryService,
     EventDispatcherService,
     ListenerFactoryService,
     BlockchainService,
-    TokenDistributorHandler,
+
+    // Event handlers
+    ERC20TransferHandler,
   ],
   exports: [
+    // Database services
+    ChainConfigService,
+    ContractDataService,
+
+    // Core services
     BlockchainConfigService,
     SdkRegistryService,
     EventDispatcherService,
@@ -42,15 +88,22 @@ export class BlockchainModule implements OnModuleInit {
     private readonly sdkRegistry: SdkRegistryService,
     private readonly configService: BlockchainConfigService,
     private readonly eventDispatcher: EventDispatcherService,
-    private readonly tokenDistributorHandler: TokenDistributorHandler,
+    private readonly contractConfigService: ContractConfigService,
+    private readonly chainConfigSeeder: ChainConfigSeeder,
+    private readonly contractConfigSeeder: ContractConfigSeeder,
+    private readonly erc20Handler: ERC20TransferHandler,
   ) {}
 
   async onModuleInit() {
-    // Register event handlers
-    this.eventDispatcher.registerHandler(this.tokenDistributorHandler);
+    // Seed data
+    await this.chainConfigSeeder.seed();
+    await this.contractConfigSeeder.seed();
 
     // Register SDK factories
     await this.registerSdkFactories();
+
+    // Register event handlers
+    this.registerEventHandlers();
   }
 
   private async registerSdkFactories() {
@@ -62,8 +115,9 @@ export class BlockchainModule implements OnModuleInit {
           chainId,
           this.configService,
           this.eventDispatcher,
+          this.contractConfigService,
         );
-      }
+      },
     );
 
     // TODO: Register Solana SDK factory when implemented
@@ -90,4 +144,12 @@ export class BlockchainModule implements OnModuleInit {
     //   }
     // );
   }
-} 
+
+  private registerEventHandlers() {
+    // Register ERC20 Transfer Handler
+    this.eventDispatcher.registerHandler(this.erc20Handler);
+
+    // Add more handlers here as needed
+    // this.eventDispatcher.registerHandler(this.otherHandler);
+  }
+}

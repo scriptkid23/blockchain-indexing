@@ -1,0 +1,182 @@
+services:
+  # MongoDB Database
+  mongo:
+    image: mongo:7.0
+    container_name: blockchain-indexing-mongo
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin123
+      MONGO_INITDB_DATABASE: blockchain_indexing
+    volumes:
+      - mongo_data:/data/db
+      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    ports:
+      - "27017:27017"
+    networks:
+      - blockchain-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Blockchain Indexing Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: blockchain-indexing-app
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      # Database Configuration
+      MONGODB_URI: mongodb://admin:admin123@mongo:27017/blockchain_indexing?authSource=admin
+      
+      # Multi-Chain Configuration
+      ## Enabled Chains (comma-separated chain IDs)
+      ENABLED_CHAINS: "1,56,137"  # Ethereum, BSC, Polygon
+      
+      ## Enabled Token Symbols (comma-separated)
+      ENABLED_TOKENS: "USDT,USDC"  # Focus on stablecoins
+      
+      # Chain-Specific RPC Configuration (Optional overrides)
+      ETH_RPC_URL: https://ethereum-rpc.publicnode.com
+      ETH_WS_URL: wss://ethereum-rpc.publicnode.com
+      
+      BSC_RPC_URL: https://bsc-rpc.publicnode.com
+      BSC_WS_URL: wss://bsc-rpc.publicnode.com
+      
+      POLYGON_RPC_URL: https://polygon-bor-rpc.publicnode.com
+      POLYGON_WS_URL: wss://polygon-bor-rpc.publicnode.com
+      
+      # Application Configuration
+      NODE_ENV: production
+      PORT: 3000
+      LOG_LEVEL: info
+      
+      # Monitoring Configuration
+      LARGE_TRANSFER_THRESHOLD_STABLECOIN: 100000  # 100k for stablecoins
+      LARGE_TRANSFER_THRESHOLD_OTHER: 1000000      # 1M for other tokens
+      
+      # Performance Tuning
+      WEBSOCKET_RECONNECT_ATTEMPTS: 5
+      CONTRACT_REFRESH_INTERVAL: 30000  # 30 seconds
+      
+      # Feature Flags
+      ENABLE_WHALE_ALERTS: "true"
+      ENABLE_MINT_BURN_TRACKING: "true"
+      ENABLE_ANALYTICS: "true"
+      
+    ports:
+      - "3000:3000"
+    volumes:
+      - app_logs:/app/logs
+    networks:
+      - blockchain-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    command: >
+      sh -c "echo 'Starting multi-chain blockchain indexing...' &&
+             echo 'Enabled chains: ${ENABLED_CHAINS}' &&
+             echo 'Enabled tokens: ${ENABLED_TOKENS}' &&
+             npm run start:prod"
+
+  # MongoDB Web Interface (Optional)
+  mongo-express:
+    image: mongo-express:1.0.0
+    container_name: blockchain-indexing-mongo-express
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: admin
+      ME_CONFIG_MONGODB_ADMINPASSWORD: admin123
+      ME_CONFIG_MONGODB_URL: mongodb://admin:admin123@mongo:27017/
+      ME_CONFIG_BASICAUTH: true
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: admin123
+    ports:
+      - "8081:8081"
+    networks:
+      - blockchain-net
+    profiles:
+      - debug
+
+  # Redis (Optional - for caching and rate limiting)
+  redis:
+    image: redis:7.2-alpine
+    container_name: blockchain-indexing-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - blockchain-net
+    profiles:
+      - cache
+
+  # Prometheus Monitoring (Optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: blockchain-indexing-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - blockchain-net
+    profiles:
+      - monitoring
+
+  # Grafana Dashboard (Optional)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: blockchain-indexing-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin123
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - blockchain-net
+    profiles:
+      - monitoring
+
+networks:
+  blockchain-net:
+    driver: bridge
+
+volumes:
+  mongo_data:
+    driver: local
+  app_logs:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local 

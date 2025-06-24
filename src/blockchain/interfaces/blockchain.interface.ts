@@ -49,4 +49,4 @@ export interface IBlockchainSDK {
 export interface IEventHandler {
   handle(event: BlockchainEvent): Promise<void>;
   canHandle(event: BlockchainEvent): boolean;
-} 
+}

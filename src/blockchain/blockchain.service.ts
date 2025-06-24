@@ -1,4 +1,9 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleInit,
+  OnModuleDestroy,
+} from '@nestjs/common';
 import { SdkRegistryService } from './core/sdk-registry.service';
 import { ListenerFactoryService } from './core/listener-factory.service';
 import { BlockchainConfigService } from './config/blockchain.config';
@@ -29,9 +34,11 @@ export class BlockchainService implements OnModuleInit, OnModuleDestroy {
 
   async startListeners(): Promise<void> {
     const enabledConfigs = this.configService.getEnabledChainConfigs();
-    
-    this.logger.log(`Starting listeners for ${enabledConfigs.length} chains...`);
-    
+
+    this.logger.log(
+      `Starting listeners for ${enabledConfigs.length} chains...`,
+    );
+
     for (const config of enabledConfigs) {
       try {
         const sdk = await this.sdkRegistry.getSDK(config.chainId);
@@ -42,7 +49,10 @@ export class BlockchainService implements OnModuleInit, OnModuleDestroy {
 
         await this.listenerFactory.startListener(sdk, config.strategy);
       } catch (error) {
-        this.logger.error(`Failed to start listener for chain ${config.chainId}:`, error);
+        this.logger.error(
+          `Failed to start listener for chain ${config.chainId}:`,
+          error,
+        );
       }
     }
 
@@ -84,18 +94,24 @@ export class BlockchainService implements OnModuleInit, OnModuleDestroy {
       registered_handlers: handlerCount,
       event_queue_size: queueSize,
       supported_chain_types: supportedChainTypes,
-      chains: enabledConfigs.map(config => ({
+      chains: enabledConfigs.map((config) => ({
         chain_id: config.chainId,
         name: config.name,
         type: config.type,
         strategy: config.strategy,
-        is_running: this.listenerFactory.isListenerRunning(config.chainId, config.strategy),
+        is_running: this.listenerFactory.isListenerRunning(
+          config.chainId,
+          config.strategy,
+        ),
         is_supported: this.sdkRegistry.isChainSupported(config.chainId),
       })),
     };
   }
 
-  async switchStrategy(chainId: number, newStrategy: EventStrategy): Promise<void> {
+  async switchStrategy(
+    chainId: number,
+    newStrategy: EventStrategy,
+  ): Promise<void> {
     const config = this.configService.getChainConfig(chainId);
     if (!config) {
       throw new Error(`Configuration not found for chain ${chainId}`);
@@ -123,7 +139,10 @@ export class BlockchainService implements OnModuleInit, OnModuleDestroy {
     }
 
     const sdk = await this.sdkRegistry.getSDK(chainId);
-    const isRunning = this.listenerFactory.isListenerRunning(chainId, config.strategy);
+    const isRunning = this.listenerFactory.isListenerRunning(
+      chainId,
+      config.strategy,
+    );
 
     return {
       chain_id: chainId,
@@ -136,4 +155,4 @@ export class BlockchainService implements OnModuleInit, OnModuleDestroy {
       latest_block: sdk ? await sdk.getLatestBlock() : null,
     };
   }
-} 
+}

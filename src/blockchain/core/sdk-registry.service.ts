@@ -6,7 +6,10 @@ import { BlockchainConfigService } from '../config/blockchain.config';
 export class SdkRegistryService implements OnModuleInit {
   private readonly logger = new Logger(SdkRegistryService.name);
   private readonly sdks: Map<number, IBlockchainSDK> = new Map();
-  private readonly factories: Map<ChainType, (chainId: number) => Promise<IBlockchainSDK>> = new Map();
+  private readonly factories: Map<
+    ChainType,
+    (chainId: number) => Promise<IBlockchainSDK>
+  > = new Map();
 
   constructor(private readonly configService: BlockchainConfigService) {}
 
@@ -14,7 +17,10 @@ export class SdkRegistryService implements OnModuleInit {
     await this.initializeSDKs();
   }
 
-  registerSDKFactory(chainType: ChainType, factory: (chainId: number) => Promise<IBlockchainSDK>) {
+  registerSDKFactory(
+    chainType: ChainType,
+    factory: (chainId: number) => Promise<IBlockchainSDK>,
+  ) {
     this.factories.set(chainType, factory);
     this.logger.log(`Registered SDK factory for chain type: ${chainType}`);
   }
@@ -34,7 +40,9 @@ export class SdkRegistryService implements OnModuleInit {
 
     const factory = this.factories.get(chainConfig.type);
     if (!factory) {
-      this.logger.error(`No factory registered for chain type: ${chainConfig.type}`);
+      this.logger.error(
+        `No factory registered for chain type: ${chainConfig.type}`,
+      );
       return undefined;
     }
 
@@ -42,7 +50,9 @@ export class SdkRegistryService implements OnModuleInit {
       const sdk = await factory(chainId);
       await sdk.connect();
       this.sdks.set(chainId, sdk);
-      this.logger.log(`Created and connected SDK for chain ${chainId} (${chainConfig.name})`);
+      this.logger.log(
+        `Created and connected SDK for chain ${chainId} (${chainConfig.name})`,
+      );
       return sdk;
     } catch (error) {
       this.logger.error(`Failed to create SDK for chain ${chainId}:`, error);
@@ -70,13 +80,16 @@ export class SdkRegistryService implements OnModuleInit {
 
   async disconnectAll(): Promise<void> {
     this.logger.log('Disconnecting all SDKs...');
-    
+
     for (const [chainId, sdk] of this.sdks) {
       try {
         await sdk.disconnect();
         this.logger.log(`Disconnected SDK for chain ${chainId}`);
       } catch (error) {
-        this.logger.error(`Failed to disconnect SDK for chain ${chainId}:`, error);
+        this.logger.error(
+          `Failed to disconnect SDK for chain ${chainId}:`,
+          error,
+        );
       }
     }
 
@@ -85,10 +98,10 @@ export class SdkRegistryService implements OnModuleInit {
 
   private async initializeSDKs(): Promise<void> {
     this.logger.log('Initializing SDK Registry...');
-    
+
     // SDKs will be created on-demand when requested
     // This allows for lazy loading and better error handling
-    
+
     this.logger.log('SDK Registry initialized');
   }
 
@@ -99,7 +112,7 @@ export class SdkRegistryService implements OnModuleInit {
   isChainSupported(chainId: number): boolean {
     const config = this.configService.getChainConfig(chainId);
     if (!config) return false;
-    
+
     return this.factories.has(config.type) && config.enabled;
   }
-} 
+}
