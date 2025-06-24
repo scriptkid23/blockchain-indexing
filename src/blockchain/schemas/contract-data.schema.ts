@@ -43,6 +43,16 @@ export class ContractData {
 
   @Prop({ type: Object })
   abi?: any[];
+
+  // Block tracking for event processing
+  @Prop()
+  lastProcessedBlock?: number;
+
+  @Prop()
+  firstSeenBlock?: number;
+
+  @Prop()
+  startFromBlock?: number; // User-defined start block for processing
 }
 
 export const ContractDataSchema = SchemaFactory.createForClass(ContractData);

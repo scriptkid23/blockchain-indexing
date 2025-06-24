@@ -156,6 +156,114 @@ export class ContractDataService {
     return `${contractType}_${chainId}`;
   }
 
+  // Block tracking methods
+  async updateLastProcessedBlock(
+    contractAddress: string,
+    chainId: number,
+    blockNumber: number,
+  ): Promise<ContractData | null> {
+    const contract = await this.findByAddress(contractAddress, chainId);
+    
+    if (!contract) {
+      return null;
+    }
+
+    // Only update if the new block number is higher
+    if (!contract.lastProcessedBlock || blockNumber > contract.lastProcessedBlock) {
+      return this.contractDataModel
+        .findOneAndUpdate(
+          { contractAddress, chainId },
+          {
+            lastProcessedBlock: blockNumber,
+            lastUpdated: new Date(),
+          },
+          { new: true },
+        )
+        .exec();
+    }
+
+    return contract;
+  }
+
+  async setFirstSeenBlock(
+    contractAddress: string,
+    chainId: number,
+    blockNumber: number,
+  ): Promise<ContractData | null> {
+    const contract = await this.findByAddress(contractAddress, chainId);
+    
+    if (!contract) {
+      return null;
+    }
+
+    // Only set if not already set or if new block is earlier
+    if (!contract.firstSeenBlock || blockNumber < contract.firstSeenBlock) {
+      return this.contractDataModel
+        .findOneAndUpdate(
+          { contractAddress, chainId },
+          {
+            firstSeenBlock: blockNumber,
+            lastUpdated: new Date(),
+          },
+          { new: true },
+        )
+        .exec();
+    }
+
+    return contract;
+  }
+
+  async setStartFromBlock(
+    contractAddress: string,
+    chainId: number,
+    blockNumber: number,
+  ): Promise<ContractData | null> {
+    return this.contractDataModel
+      .findOneAndUpdate(
+        { contractAddress, chainId },
+        {
+          startFromBlock: blockNumber,
+          lastUpdated: new Date(),
+        },
+        { new: true },
+      )
+      .exec();
+  }
+
+  async getContractsNeedingProcessing(
+    chainId: number,
+    currentBlock: number,
+  ): Promise<ContractData[]> {
+    return this.contractDataModel
+      .find({
+        chainId,
+        isActive: true,
+        $or: [
+          { lastProcessedBlock: { $exists: false } },
+          { lastProcessedBlock: { $lt: currentBlock } },
+        ],
+      })
+      .exec();
+  }
+
+  async getProcessingStatus(chainId: number) {
+    const contracts = await this.contractDataModel
+      .find({ chainId, isActive: true })
+      .select('contractAddress symbol lastProcessedBlock firstSeenBlock startFromBlock')
+      .exec();
+
+    return contracts.map(contract => ({
+      address: contract.contractAddress,
+      symbol: contract.symbol,
+      lastProcessedBlock: contract.lastProcessedBlock || 0,
+      firstSeenBlock: contract.firstSeenBlock,
+      startFromBlock: contract.startFromBlock,
+      blocksProcessed: contract.lastProcessedBlock 
+        ? contract.lastProcessedBlock - (contract.startFromBlock || contract.firstSeenBlock || 0)
+        : 0,
+    }));
+  }
+
   // Helper method for ERC20 specific operations
   async saveERC20Data(
     contractAddress: string,
@@ -166,6 +274,8 @@ export class ContractDataService {
       decimals: number;
       totalSupply?: string;
       owner?: string;
+      firstSeenBlock?: number;
+      startFromBlock?: number;
     },
   ): Promise<ContractData> {
     return this.upsertContract({
@@ -177,6 +287,8 @@ export class ContractDataService {
       decimals: tokenData.decimals,
       totalSupply: tokenData.totalSupply,
       owner: tokenData.owner,
+      firstSeenBlock: tokenData.firstSeenBlock,
+      startFromBlock: tokenData.startFromBlock,
       metadata: {
         tokenType: 'ERC20',
         ...tokenData,

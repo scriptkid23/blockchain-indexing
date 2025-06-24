@@ -214,7 +214,7 @@ export class ERC20TransferHandler implements IEventHandler {
       );
 
       if (!contractData) {
-        // Create initial contract data
+        // Create initial contract data with block tracking
         contractData = await this.contractDataService.saveERC20Data(
           event.contractAddress!,
           event.chainId,
@@ -223,17 +223,20 @@ export class ERC20TransferHandler implements IEventHandler {
             symbol: transferData.contractInfo.symbol,
             decimals: transferData.contractInfo.decimals,
             totalSupply: '0',
+            firstSeenBlock: event.blockNumber,
+            startFromBlock: event.blockNumber,
           },
         );
 
-        // Update with transfer metadata
+        // Update with transfer metadata and block tracking
         await this.contractDataService.updateContract(
           event.contractAddress!,
           event.chainId,
           {
+            lastProcessedBlock: event.blockNumber,
             metadata: {
               ...contractData.metadata,
-              lastBlock: event.blockNumber,
+              lastBlock: event.blockNumber, // Legacy field, keep for compatibility
               transferCount: 1,
               largeTransferCount: transferData.isLargeTransfer ? 1 : 0,
               lastTransferTimestamp: event.timestamp,
@@ -248,13 +251,30 @@ export class ERC20TransferHandler implements IEventHandler {
         const currentLargeTransferCount =
           contractData.metadata?.largeTransferCount || 0;
 
+        // Update block tracking
+        await this.contractDataService.updateLastProcessedBlock(
+          event.contractAddress!,
+          event.chainId,
+          event.blockNumber,
+        );
+
+        // Set first seen block if not set
+        if (!contractData.firstSeenBlock) {
+          await this.contractDataService.setFirstSeenBlock(
+            event.contractAddress!,
+            event.chainId,
+            event.blockNumber,
+          );
+        }
+
+        // Update metadata
         await this.contractDataService.updateContract(
           event.contractAddress!,
           event.chainId,
           {
             metadata: {
               ...contractData.metadata,
-              lastBlock: event.blockNumber,
+              lastBlock: event.blockNumber, // Legacy field, keep for compatibility
               transferCount: currentTransferCount + 1,
               largeTransferCount:
                 currentLargeTransferCount +
@@ -264,6 +284,10 @@ export class ERC20TransferHandler implements IEventHandler {
           },
         );
       }
+
+      this.logger.debug(
+        `📊 Updated ${transferData.contractInfo.symbol} metadata: block ${event.blockNumber}, transfers: ${(contractData.metadata?.transferCount || 0) + 1}`,
+      );
     } catch (error) {
       this.logger.error(
         `Error updating ${transferData.contractInfo.symbol} contract metadata:`,
