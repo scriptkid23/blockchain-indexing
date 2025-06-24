@@ -15,12 +15,16 @@ export class EvmBlockScanListener implements IBlockchainListener {
   private scanInterval: NodeJS.Timeout | null = null;
   private lastProcessedBlock = 0;
   private readonly scanIntervalMs: number;
-  private readonly blocksPerScan = 10;
+  private readonly blocksPerScan: number;
   private contractConfigs: ContractConfig[] = [];
   private contractAddresses: Set<string> = new Set();
   private eventSignatures: Set<string> = new Set();
   private contractRefreshTimer: NodeJS.Timeout | null = null;
   private readonly contractRefreshInterval = 30000; // 30 seconds
+  private readonly batchSize = 3; // Process 3 contracts per batch
+  private readonly batchDelay = 500; // 500ms delay between batches
+  private rpcRequestCount = 0;
+  private lastCounterResetTime = Date.now();
 
   constructor(
     private readonly chainId: number,
@@ -30,6 +34,7 @@ export class EvmBlockScanListener implements IBlockchainListener {
     private readonly contractConfigService: ContractConfigService,
   ) {
     this.scanIntervalMs = config.scanInterval || 5000; // Default 5 seconds
+    this.blocksPerScan = parseInt(process.env.BLOCKS_PER_SCAN || '50', 10); // Configurable batch size
   }
 
   async start(): Promise<void> {
@@ -97,6 +102,53 @@ export class EvmBlockScanListener implements IBlockchainListener {
     return this._isRunning;
   }
 
+  // Utility functions for batch processing
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private chunks<T>(array: T[], chunkSize: number): T[][] {
+    const result: T[][] = [];
+    for (let i = 0; i < array.length; i += chunkSize) {
+      result.push(array.slice(i, i + chunkSize));
+    }
+    return result;
+  }
+
+  private async processBatches<T, R>(
+    items: T[],
+    processFn: (batch: T[]) => Promise<R[]>,
+    batchSize: number = this.batchSize,
+    delayMs: number = this.batchDelay,
+  ): Promise<R[]> {
+    let results: R[] = [];
+    const batches = this.chunks(items, batchSize);
+
+    for (let i = 0; i < batches.length; i++) {
+      const batchResults = await processFn(batches[i]);
+      results = [...results, ...batchResults];
+
+      // Add delay between batches (except after the last batch)
+      if (i < batches.length - 1) {
+        await this.sleep(delayMs);
+      }
+    }
+
+    return results;
+  }
+
+  private trackRpcRequest(): void {
+    this.rpcRequestCount++;
+    const currentTime = Date.now();
+    const COUNTER_INTERVAL_MS = 10000; // 10 seconds
+
+    if (currentTime - this.lastCounterResetTime >= COUNTER_INTERVAL_MS) {
+      this.logger.debug(`🔗 RPC Requests in last 10s: ${this.rpcRequestCount}`);
+      this.rpcRequestCount = 0;
+      this.lastCounterResetTime = currentTime;
+    }
+  }
+
   private async loadContracts(): Promise<void> {
     try {
       this.contractConfigs =
@@ -162,11 +214,12 @@ export class EvmBlockScanListener implements IBlockchainListener {
 
   private async scanForNewBlocks(): Promise<void> {
     try {
+      this.trackRpcRequest();
       const latestBlock = await this.provider.getBlockNumber();
 
       if (latestBlock <= this.lastProcessedBlock) {
         this.logger.debug(
-          `No new blocks to process for chain ${this.chainId}. Latest: ${latestBlock}, Last processed: ${this.lastProcessedBlock}`,
+          `📊 No new blocks to process for chain ${this.chainId}. Latest: ${latestBlock}, Last processed: ${this.lastProcessedBlock}`,
         );
         return;
       }
@@ -177,193 +230,306 @@ export class EvmBlockScanListener implements IBlockchainListener {
         startBlock + this.blocksPerScan - 1,
       );
 
-      this.logger.debug(
-        `Scanning blocks ${startBlock} to ${endBlock} for chain ${this.chainId}`,
+      this.logger.log(
+        `🔍 Scanning blocks ${startBlock} to ${endBlock} for chain ${this.chainId} (${endBlock - startBlock + 1} blocks)`,
       );
 
-      // Process blocks sequentially to maintain order
-      for (
-        let blockNumber = startBlock;
-        blockNumber <= endBlock;
-        blockNumber++
-      ) {
-        if (!this.isRunning()) break;
+      // Use efficient batch processing for event extraction
+      await this.processBlockRangeWithBatching(startBlock, endBlock);
 
-        await this.processBlock(blockNumber);
-        this.lastProcessedBlock = blockNumber;
-      }
+      this.lastProcessedBlock = endBlock;
 
       if (endBlock < latestBlock) {
         this.logger.debug(
-          `More blocks to process for chain ${this.chainId}. Will continue in next scan.`,
+          `⏳ More blocks to process for chain ${this.chainId}. Will continue in next scan.`,
         );
       }
     } catch (error) {
       this.logger.error(
-        `Error scanning for new blocks on chain ${this.chainId}:`,
+        `❌ Error scanning for new blocks on chain ${this.chainId}:`,
         error,
       );
     }
   }
 
-  private async processBlock(blockNumber: number): Promise<void> {
+  private async processBlockRangeWithBatching(
+    fromBlock: number,
+    toBlock: number,
+  ): Promise<void> {
     try {
-      const block = await this.provider.getBlock(blockNumber, true);
-      if (!block) {
-        this.logger.warn(
-          `Block ${blockNumber} not found on chain ${this.chainId}`,
-        );
+      if (this.contractConfigs.length === 0) {
+        this.logger.debug('📭 No contracts to monitor, skipping block range processing');
         return;
       }
 
-      this.logger.debug(
-        `Processing block ${blockNumber} with ${block.transactions.length} transactions on chain ${this.chainId}`,
+      // Get all events from all contracts in the block range using batch processing
+      const allEvents = await this.getAllContractEventsInRange(
+        fromBlock,
+        toBlock,
       );
 
-      // Process each transaction in the block
-      for (const tx of block.transactions) {
-        if (!this.isRunning()) break;
-        if (typeof tx === 'string') continue;
+      if (allEvents.length > 0) {
+        // Group events by type for logging
+        const eventTypes = allEvents.reduce((acc, event) => {
+          acc[event.eventName] = (acc[event.eventName] || 0) + 1;
+          return acc;
+        }, {} as Record<string, number>);
 
-        await this.processTransaction(tx as ethers.TransactionResponse, block);
+        this.logger.log(
+          `🎯 Found ${allEvents.length} events in blocks ${fromBlock}-${toBlock}:`,
+        );
+        Object.entries(eventTypes).forEach(([eventName, count]) => {
+          this.logger.log(`  📋 ${eventName}: ${count}`);
+        });
+
+        // Process each event
+        for (const event of allEvents) {
+          if (!this.isRunning()) break;
+          await this.processContractEvent(event);
+        }
+      } else {
+        this.logger.debug(
+          `📭 No events found in blocks ${fromBlock}-${toBlock} for chain ${this.chainId}`,
+        );
       }
     } catch (error) {
       this.logger.error(
-        `Error processing block ${blockNumber} on chain ${this.chainId}:`,
+        `❌ Error processing block range ${fromBlock}-${toBlock} on chain ${this.chainId}:`,
         error,
       );
     }
   }
 
-  private async processTransaction(
-    tx: ethers.TransactionResponse,
-    block: ethers.Block,
-  ): Promise<void> {
+  private async getAllContractEventsInRange(
+    fromBlock: number,
+    toBlock: number,
+  ): Promise<Array<{
+    eventName: string;
+    blockNumber: number;
+    transactionHash: string;
+    args: any[];
+    timestamp: number;
+    logIndex: number;
+    transactionIndex: number;
+    contractConfig: ContractConfig;
+  }>> {
+    const allEvents: any[] = [];
+
+    // Process contracts in batches to avoid rate limiting
+    await this.processBatches(
+      this.contractConfigs,
+      async (batchConfigs) => {
+        const contractPromises = batchConfigs.map(async (config) => {
+          try {
+            const contract = new ethers.Contract(
+              config.address,
+              config.abi,
+              this.provider,
+            );
+
+            // Get event names from config
+            const eventNames = this.getEventNamesFromConfig(config);
+
+            // Process events for this contract in batches
+            const contractEvents = await this.processBatches(
+              eventNames,
+              async (batchEventNames) => {
+                const eventPromises = batchEventNames.map(async (eventName) => {
+                  try {
+                    this.trackRpcRequest();
+                    const filter = (contract.filters as any)[eventName]?.();
+                    if (!filter) return [];
+
+                    const events = await contract.queryFilter(
+                      filter,
+                      fromBlock,
+                      toBlock,
+                    );
+
+                    return events.map((event) => ({
+                      eventName,
+                      blockNumber: event.blockNumber,
+                      transactionHash: event.transactionHash,
+                      args: this.decodeEventData(event, config, eventName),
+                      timestamp: 0, // Will be filled later
+                      logIndex: event.index,
+                      transactionIndex: event.transactionIndex,
+                      contractConfig: config,
+                    }));
+                  } catch (error) {
+                    this.logger.warn(
+                      `⚠️ Failed to query ${eventName} events for ${config.symbol}:`,
+                      error,
+                    );
+                    return [];
+                  }
+                });
+
+                return (await Promise.all(eventPromises)).flat();
+              },
+              2, // 2 events per batch
+              300, // 300ms delay
+            );
+
+            return contractEvents;
+          } catch (error) {
+            this.logger.error(
+              `❌ Failed to process contract ${config.symbol}:`,
+              error,
+            );
+            return [];
+          }
+        });
+
+        const batchResults = await Promise.all(contractPromises);
+        allEvents.push(...batchResults.flat());
+
+        return [];
+      },
+      this.batchSize, // Use configured batch size
+      this.batchDelay, // Use configured delay
+    );
+
+    // Sort events by block number and log index
+    allEvents.sort((a, b) => {
+      if (a.blockNumber !== b.blockNumber) {
+        return a.blockNumber - b.blockNumber;
+      }
+      return a.logIndex - b.logIndex;
+    });
+
+    // Get block timestamps in batches
+    const uniqueBlocks = [...new Set(allEvents.map((e) => e.blockNumber))];
+    const blockTimestamps = new Map<number, number>();
+
+    await this.processBatches(
+      uniqueBlocks,
+      async (batchBlocks) => {
+        const blockPromises = batchBlocks.map(async (blockNumber) => {
+          try {
+            this.trackRpcRequest();
+            const block = await this.provider.getBlock(blockNumber);
+            return { number: blockNumber, timestamp: block?.timestamp || 0 };
+          } catch (error) {
+            this.logger.warn(`⚠️ Failed to get block ${blockNumber}:`, error);
+            return { number: blockNumber, timestamp: 0 };
+          }
+        });
+
+        const blocks = await Promise.all(blockPromises);
+        blocks.forEach((block) => {
+          blockTimestamps.set(block.number, block.timestamp);
+        });
+
+        return [];
+      },
+      5, // 5 blocks per batch
+      200, // 200ms delay
+    );
+
+    // Add timestamps to events
+    return allEvents.map((event) => ({
+      ...event,
+      timestamp: (blockTimestamps.get(event.blockNumber) || 0) * 1000,
+    }));
+  }
+
+  private getEventNamesFromConfig(config: ContractConfig): string[] {
+    // Parse event names from signature hashes
+    const knownEvents: { [key: string]: string } = {
+      '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef': 'Transfer',
+      '0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925': 'Approval',
+    };
+
+    return config.events
+      .map((eventSig) => knownEvents[eventSig])
+      .filter(Boolean);
+  }
+
+  private async processContractEvent(event: {
+    eventName: string;
+    blockNumber: number;
+    transactionHash: string;
+    args: any[];
+    timestamp: number;
+    logIndex: number;
+    transactionIndex: number;
+    contractConfig: ContractConfig;
+  }): Promise<void> {
     try {
-      // Get transaction receipt for logs
-      const receipt = await this.provider.getTransactionReceipt(tx.hash);
+      // Get transaction receipt for additional data
+      this.trackRpcRequest();
+      const receipt = await this.provider.getTransactionReceipt(
+        event.transactionHash,
+      );
       if (!receipt) {
         this.logger.warn(
-          `Transaction receipt not found for ${tx.hash} on chain ${this.chainId}`,
+          `Transaction receipt not found for ${event.transactionHash}`,
         );
         return;
       }
-
-      // Only process transactions with logs from monitored contracts
-      if (!tx.to || receipt.logs.length === 0) return;
-
-      let hasMonitoredEvents = false;
-
-      // Process contract logs
-      for (const log of receipt.logs) {
-        if (!this.isMonitoredContract(log.address)) continue;
-        if (!this.isMonitoredEvent(log.topics[0])) continue;
-
-        hasMonitoredEvents = true;
-        await this.processContractLog(log, tx, block, receipt);
-      }
-
-      // Log transaction summary if it contained monitored events
-      if (hasMonitoredEvents) {
-        this.logger.debug(
-          `Processed transaction ${tx.hash} with monitored contract events`,
-        );
-      }
-    } catch (error) {
-      this.logger.error(
-        `Error processing transaction ${tx.hash} on chain ${this.chainId}:`,
-        error,
-      );
-    }
-  }
-
-  private async processContractLog(
-    log: ethers.Log,
-    tx: ethers.TransactionResponse,
-    block: ethers.Block,
-    receipt: ethers.TransactionReceipt,
-  ): Promise<void> {
-    try {
-      const contractConfig = this.getContractConfig(log.address);
-      if (!contractConfig) return;
-
-      // Get event name from signature
-      const eventName = this.parseEventName(log.topics[0]);
-      if (!eventName) return;
-
-      // Decode event data
-      const eventArgs = this.decodeEventData(log, contractConfig, eventName);
 
       // Create blockchain event
       const blockchainEvent: BlockchainEvent = {
         chainId: this.chainId,
-        blockNumber: block.number,
-        transactionHash: tx.hash,
+        blockNumber: event.blockNumber,
+        transactionHash: event.transactionHash,
         eventType: 'contract_log',
-        contractAddress: log.address,
+        contractAddress: event.contractConfig.address,
         data: {
-          topics: log.topics,
-          data: log.data,
-          logIndex: log.index,
-          transactionIndex: log.transactionIndex,
+          topics: [], // Will be filled if needed
+          data: '0x',
+          logIndex: event.logIndex,
+          transactionIndex: event.transactionIndex,
           gasUsed: receipt.gasUsed.toString(),
           status: receipt.status,
           contract: {
-            name: contractConfig.name,
-            symbol: contractConfig.symbol,
-            type: contractConfig.type,
+            name: event.contractConfig.name,
+            symbol: event.contractConfig.symbol,
+            type: event.contractConfig.type,
           },
           event: {
-            name: eventName,
-            signature: log.topics[0],
-            args: this.formatEventArgs(eventName, eventArgs, contractConfig),
+            name: event.eventName,
+            signature: this.getEventSignature(event.eventName),
+            args: this.formatEventArgs(
+              event.eventName,
+              event.args,
+              event.contractConfig,
+            ),
           },
         },
-        timestamp: block.timestamp * 1000,
+        timestamp: event.timestamp,
       };
 
       this.logger.log(
-        `${contractConfig.symbol} ${eventName}: ${this.formatEventDisplay(eventName, eventArgs, contractConfig)}`,
+        `${event.contractConfig.symbol} ${event.eventName}: ${this.formatEventDisplay(
+          event.eventName,
+          event.args,
+          event.contractConfig,
+        )}`,
       );
 
       await this.eventDispatcher.dispatchEvent(blockchainEvent);
     } catch (error) {
       this.logger.error(
-        `Error processing contract log for ${log.address}:`,
+        `❌ Error processing contract event for ${event.contractConfig.symbol}:`,
         error,
       );
     }
   }
 
-  private isMonitoredContract(address: string): boolean {
-    return this.contractAddresses.has(address.toLowerCase());
-  }
-
-  private isMonitoredEvent(eventSignature: string): boolean {
-    return this.eventSignatures.has(eventSignature);
-  }
-
-  private getContractConfig(address: string): ContractConfig | null {
-    return (
-      this.contractConfigs.find(
-        (config) => config.address.toLowerCase() === address.toLowerCase(),
-      ) || null
-    );
-  }
-
-  private parseEventName(eventSignature: string): string | null {
-    const knownEvents: { [key: string]: string } = {
-      '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef':
-        'Transfer',
-      '0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925':
-        'Approval',
+  private getEventSignature(eventName: string): string {
+    const knownSignatures: { [key: string]: string } = {
+      Transfer: '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef',
+      Approval: '0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925',
     };
-
-    return knownEvents[eventSignature] || null;
+    return knownSignatures[eventName] || '';
   }
+
+  // Legacy methods removed - now using batch processing approach
 
   private decodeEventData(
-    log: ethers.Log,
+    event: ethers.Log,
     contractConfig: ContractConfig,
     eventName: string,
   ): any[] {
@@ -371,14 +537,14 @@ export class EvmBlockScanListener implements IBlockchainListener {
       // Create interface for decoding
       const iface = new ethers.Interface(contractConfig.abi);
       const decoded = iface.parseLog({
-        topics: log.topics,
-        data: log.data,
+        topics: event.topics,
+        data: event.data,
       });
 
-      return decoded ? decoded.args : [];
+      return decoded ? Array.from(decoded.args) : [];
     } catch (error) {
       this.logger.warn(
-        `Failed to decode ${eventName} event for ${contractConfig.name}:`,
+        `⚠️ Failed to decode ${eventName} event for ${contractConfig.name}:`,
         error,
       );
       return [];

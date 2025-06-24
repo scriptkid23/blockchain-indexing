@@ -90,16 +90,40 @@ export class ERC20TransferHandler implements IEventHandler {
 
   canHandle(event: BlockchainEvent): boolean {
     // Handle Transfer events for all ERC20 contracts
-    return (
-      event.eventType === 'contract_log' &&
-      !!event.contractAddress &&
-      this.isTransferEvent(event)
-    );
+    const isContractLog = event.eventType === 'contract_log';
+    const hasContractAddress = !!event.contractAddress;
+    const isTransfer = this.isTransferEvent(event);
+    
+    const canHandle = isContractLog && hasContractAddress && isTransfer;
+    
+    if (!canHandle) {
+      this.logger.debug(`🔍 Handler check - Contract log: ${isContractLog}, Has address: ${hasContractAddress}, Is transfer: ${isTransfer}, Event name: ${event.data?.event?.name}`);
+    }
+    
+    return canHandle;
   }
 
   private isTransferEvent(event: BlockchainEvent): boolean {
+    // Check if event has signature in data.event.signature
+    if (event.data?.event?.signature) {
+      const eventSignature = event.data.event.signature;
+      const abi = getABI('erc20');
+      const transferSignature = getEventSignatureHash(this.TRANSFER_EVENT_NAME, abi);
+      return eventSignature === transferSignature;
+    }
+
+    // Fallback: check topics array
     const topics = (event.data?.topics as string[]) || [];
-    if (!topics[0]) return false;
+    if (!topics[0]) {
+      this.logger.debug(`No event signature found for event: ${JSON.stringify({
+        eventType: event.eventType,
+        contractAddress: event.contractAddress,
+        hasDataEvent: !!event.data?.event,
+        hasTopics: topics.length > 0,
+        eventName: event.data?.event?.name,
+      })}`);
+      return false;
+    }
     
     // Get Transfer event signature hash dynamically
     const abi = getABI('erc20');

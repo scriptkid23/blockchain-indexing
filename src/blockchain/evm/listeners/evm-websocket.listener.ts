@@ -188,15 +188,6 @@ export class EvmWebSocketListener implements IBlockchainListener {
           const event = args[args.length - 1]; // Last argument is always the event object
           const eventArgs = args.slice(0, -1); // All arguments except the last one
 
-          // Enhanced logging for debugging
-          this.logger.debug(`Raw event structure for ${config.name}.${eventName}:`, {
-            eventKeys: Object.keys(event || {}),
-            hasTransactionHash: !!event?.transactionHash,
-            hasBlockNumber: !!event?.blockNumber,
-            hasLog: !!event?.log,
-            eventType: typeof event,
-          });
-
           await this.processContractEvent(
             contractInstance,
             eventName,
