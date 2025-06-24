@@ -188,6 +188,15 @@ export class EvmWebSocketListener implements IBlockchainListener {
           const event = args[args.length - 1]; // Last argument is always the event object
           const eventArgs = args.slice(0, -1); // All arguments except the last one
 
+          // Enhanced logging for debugging
+          this.logger.debug(`Raw event structure for ${config.name}.${eventName}:`, {
+            eventKeys: Object.keys(event || {}),
+            hasTransactionHash: !!event?.transactionHash,
+            hasBlockNumber: !!event?.blockNumber,
+            hasLog: !!event?.log,
+            eventType: typeof event,
+          });
+
           await this.processContractEvent(
             contractInstance,
             eventName,
@@ -220,26 +229,70 @@ export class EvmWebSocketListener implements IBlockchainListener {
     const { config } = contractInstance;
 
     try {
+      // Extract event data - ethers.js events can have different structures
+      let transactionHash: string;
+      let blockNumber: number;
+      let logIndex: number;
+      let transactionIndex: number;
+      let topics: string[];
+      let data: string;
+
+      // Handle different event structures from ethers.js
+      if (event.log) {
+        // Event has a log property (common in newer ethers versions)
+        transactionHash = event.log.transactionHash;
+        blockNumber = event.log.blockNumber;
+        logIndex = event.log.logIndex;
+        transactionIndex = event.log.transactionIndex;
+        topics = event.log.topics;
+        data = event.log.data;
+      } else if (event.transactionHash && event.blockNumber) {
+        // Direct properties on event object
+        transactionHash = event.transactionHash;
+        blockNumber = event.blockNumber;
+        logIndex = event.logIndex;
+        transactionIndex = event.transactionIndex;
+        topics = event.topics;
+        data = event.data;
+      } else {
+        this.logger.warn(`Invalid event data structure for ${config.name}:`, {
+          eventKeys: Object.keys(event || {}),
+          hasLog: !!event?.log,
+          hasTransactionHash: !!event?.transactionHash,
+          hasBlockNumber: !!event?.blockNumber,
+        });
+        return;
+      }
+
+      // Validate required fields
+      if (!transactionHash || !blockNumber) {
+        this.logger.warn(`Missing required event data for ${config.name}: transactionHash=${!!transactionHash}, blockNumber=${!!blockNumber}`);
+        return;
+      }
+
       // Get transaction receipt and block details
       const [receipt, block] = await Promise.all([
-        this.wsProvider.getTransactionReceipt(event.transactionHash),
-        this.wsProvider.getBlock(event.blockNumber),
+        this.wsProvider.getTransactionReceipt(transactionHash),
+        this.wsProvider.getBlock(blockNumber),
       ]);
 
-      if (!receipt || !block) return;
+      if (!receipt || !block) {
+        this.logger.warn(`Failed to get receipt or block for ${config.name} tx: ${transactionHash}`);
+        return;
+      }
 
       // Create blockchain event
       const blockchainEvent: BlockchainEvent = {
         chainId: this.chainId,
-        blockNumber: event.blockNumber,
-        transactionHash: event.transactionHash,
+        blockNumber: blockNumber,
+        transactionHash: transactionHash,
         eventType: 'contract_log',
         contractAddress: config.address,
         data: {
-          topics: event.topics || [],
-          data: event.data || '0x',
-          logIndex: event.logIndex,
-          transactionIndex: event.transactionIndex,
+          topics: topics || [],
+          data: data || '0x',
+          logIndex: logIndex,
+          transactionIndex: transactionIndex,
           gasUsed: receipt.gasUsed.toString(),
           status: receipt.status,
           contract: {
@@ -263,7 +316,7 @@ export class EvmWebSocketListener implements IBlockchainListener {
       await this.eventDispatcher.dispatchEvent(blockchainEvent);
     } catch (error) {
       this.logger.error(
-        `Error processing ${eventName} event for ${config.name} (${event.transactionHash}):`,
+        `Error processing ${eventName} event for ${config.name}:`,
         error,
       );
     }
