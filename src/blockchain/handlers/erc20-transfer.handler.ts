@@ -277,9 +277,25 @@ export class ERC20TransferHandler implements IEventHandler {
     transferData: ERC20TransferData,
   ): Promise<void> {
     try {
+      // Check if event already exists to prevent duplicates
+      const existingEvent = await this.blockchainEventModel.findOne({
+        transactionHash: event.transactionHash,
+        logIndex: event.data?.logIndex,
+        chainId: event.chainId,
+      });
+
+      if (existingEvent) {
+        this.logger.debug(
+          `Event already exists for ${transferData.contractInfo.symbol} Transfer: ${event.transactionHash} (logIndex: ${event.data?.logIndex})`,
+        );
+        return;
+      }
+
       // Enhanced event data with ERC20-specific information
       const enhancedEvent = {
         ...event,
+        logIndex: event.data?.logIndex,
+        transactionIndex: event.data?.transactionIndex,
         data: {
           ...event.data,
           contractInfo: {
@@ -304,10 +320,18 @@ export class ERC20TransferHandler implements IEventHandler {
       await eventDoc.save();
 
       this.logger.debug(
-        `Saved ${transferData.contractInfo.symbol} Transfer event to database: ${event.transactionHash}`,
+        `✅ Saved ${transferData.contractInfo.symbol} Transfer event: ${event.transactionHash} (logIndex: ${event.data?.logIndex})`,
       );
     } catch (error) {
-      this.logger.error(`Error saving ERC20 event to database:`, error);
+      // Check if it's a duplicate key error
+      if (error.code === 11000) {
+        this.logger.debug(
+          `⚠️  Duplicate event detected for ${transferData.contractInfo.symbol} Transfer: ${event.transactionHash} (logIndex: ${event.data?.logIndex})`,
+        );
+        return;
+      }
+      
+      this.logger.error(`❌ Error saving ERC20 event to database:`, error);
     }
   }
 

@@ -51,3 +51,14 @@ BlockchainEventSchema.index({ transactionHash: 1 });
 BlockchainEventSchema.index({ contractAddress: 1, eventType: 1 });
 BlockchainEventSchema.index({ processed: 1 });
 BlockchainEventSchema.index({ timestamp: 1 });
+
+// Unique constraint to prevent duplicate events
+// Combination of transactionHash, logIndex, and chainId should be unique
+BlockchainEventSchema.index(
+  { 
+    transactionHash: 1, 
+    logIndex: 1, 
+    chainId: 1 
+  }, 
+  { unique: true }
+);
