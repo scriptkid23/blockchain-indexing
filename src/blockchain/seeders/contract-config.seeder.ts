@@ -202,7 +202,7 @@ export class ContractConfigSeeder {
           );
         } else {
           this.logger.log(
-            `⏭️  Exists: ${contractConfig.symbol} on chain ${contractConfig.chainId} (${existing.enabled ? 'ENABLED' : 'DISABLED'})`,
+            `⏭️  Already exists: ${contractConfig.symbol} on chain ${contractConfig.chainId} (${existing.enabled ? 'ENABLED' : 'DISABLED'}) - skipping to avoid override`,
           );
         }
       } catch (error) {

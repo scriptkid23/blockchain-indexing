@@ -22,14 +22,20 @@ export class ChainConfigSeeder {
 
     for (const config of chainConfigs) {
       try {
-        await this.chainConfigModel.findOneAndUpdate(
-          { chainId: config.chainId },
-          config,
-          { upsert: true, new: true },
-        );
-        this.logger.log(
-          `Seeded chain config for ${config.name} (${config.chainId})`,
-        );
+        const existing = await this.chainConfigModel.findOne({ 
+          chainId: config.chainId 
+        });
+
+        if (!existing) {
+          await this.chainConfigModel.create(config);
+          this.logger.log(
+            `✅ Created chain config for ${config.name} (${config.chainId})`,
+          );
+        } else {
+          this.logger.log(
+            `⏭️  Chain config already exists for ${config.name} (${config.chainId}) - skipping`,
+          );
+        }
       } catch (error) {
         this.logger.error(`Failed to seed ${config.name}:`, error);
       }
