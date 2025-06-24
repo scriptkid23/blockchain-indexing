@@ -9,6 +9,8 @@ import { ListenerFactoryService } from './core/listener-factory.service';
 import { BlockchainConfigService } from './config/blockchain.config';
 import { EventDispatcherService } from './core/event-dispatcher.service';
 import { ChainType, EventStrategy } from './interfaces/blockchain.interface';
+import { ChainConfigSeeder } from './seeders/chain-config.seeder';
+import { ContractConfigSeeder } from './seeders/contract-config.seeder';
 
 @Injectable()
 export class BlockchainService implements OnModuleInit, OnModuleDestroy {
@@ -19,11 +21,24 @@ export class BlockchainService implements OnModuleInit, OnModuleDestroy {
     private readonly listenerFactory: ListenerFactoryService,
     private readonly configService: BlockchainConfigService,
     private readonly eventDispatcher: EventDispatcherService,
+    private readonly chainConfigSeeder: ChainConfigSeeder,
+    private readonly contractConfigSeeder: ContractConfigSeeder,
   ) {}
 
   async onModuleInit() {
     this.logger.log('Initializing Blockchain Indexing Service...');
+    await this.initialize();
+  }
+
+  async initialize(): Promise<void> {
+    // Seed database with chain and contract configurations
+    await this.chainConfigSeeder.seed();
+    await this.contractConfigSeeder.seed();
+    
+    // Start blockchain listeners
     await this.startListeners();
+    
+    this.logger.log('Blockchain service initialization complete');
   }
 
   async onModuleDestroy() {

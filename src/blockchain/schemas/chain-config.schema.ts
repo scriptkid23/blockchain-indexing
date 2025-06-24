@@ -38,7 +38,13 @@ export class ChainConfig {
   @Prop()
   explorerUrl?: string;
 
-  @Prop()
+  @Prop({
+    type: {
+      name: String,
+      symbol: String,
+      decimals: Number,
+    },
+  })
   nativeCurrency?: {
     name: string;
     symbol: string;

@@ -5,8 +5,6 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { BlockchainModule } from './blockchain/blockchain.module';
 import { BlockchainService } from './blockchain/blockchain.service';
-import { BlockchainController } from './blockchain/blockchain.controller';
-import { ChainConfigSeeder } from './blockchain/seeders/chain-config.seeder';
 
 @Module({
   imports: [
@@ -26,14 +24,14 @@ import { ChainConfigSeeder } from './blockchain/seeders/chain-config.seeder';
     }),
     BlockchainModule,
   ],
-  controllers: [AppController, BlockchainController],
-  providers: [AppService, BlockchainService],
+  controllers: [AppController],
+  providers: [AppService],
 })
 export class AppModule implements OnModuleInit {
-  constructor(private chainConfigSeeder: ChainConfigSeeder) {}
+  constructor(private blockchainService: BlockchainService) {}
 
   async onModuleInit() {
-    // Seed chain configurations on startup
-    await this.chainConfigSeeder.seed();
+    // Initialize blockchain service (which will seed configurations)
+    await this.blockchainService.initialize();
   }
 }
