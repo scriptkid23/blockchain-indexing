@@ -11,6 +11,13 @@ import {
   BlockchainEvent as BlockchainEventDocument,
   BlockchainEventDocument as BlockchainEventDoc,
 } from '../schemas/blockchain-event.schema';
+import {
+  ERC20_EVENTS,
+  getEventSignatureHash,
+  getABI,
+  formatTokenAmount,
+  isLargeTransfer,
+} from '../evm/utils/evm-constants';
 
 interface ERC20TransferData {
   from: string;
@@ -39,9 +46,8 @@ interface TransferEventArgs {
 export class ERC20TransferHandler implements IEventHandler {
   private readonly logger = new Logger(ERC20TransferHandler.name);
 
-  // Transfer event signature: Transfer(address indexed from, address indexed to, uint256 value)
-  private readonly TRANSFER_EVENT_SIGNATURE =
-    '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+  // Transfer event name (simple string instead of complex hash)
+  private readonly TRANSFER_EVENT_NAME = ERC20_EVENTS.TRANSFER;
 
   constructor(
     private readonly contractDataService: ContractDataService,
@@ -93,7 +99,13 @@ export class ERC20TransferHandler implements IEventHandler {
 
   private isTransferEvent(event: BlockchainEvent): boolean {
     const topics = (event.data?.topics as string[]) || [];
-    return topics[0] === this.TRANSFER_EVENT_SIGNATURE;
+    if (!topics[0]) return false;
+    
+    // Get Transfer event signature hash dynamically
+    const abi = getABI('erc20');
+    const transferSignature = getEventSignatureHash(this.TRANSFER_EVENT_NAME, abi);
+    
+    return topics[0] === transferSignature;
   }
 
   private async extractTransferData(
@@ -121,7 +133,7 @@ export class ERC20TransferHandler implements IEventHandler {
 
       const value = args.value;
       const valueFormatted = this.formatTokenValue(value, contractInfo.decimals);
-      const isLargeTransfer = this.isLargeTransfer(
+      const isLargeTransferResult = this.isLargeTransferCheck(
         value,
         contractInfo.decimals,
         contractInfo.isStablecoin,
@@ -132,7 +144,7 @@ export class ERC20TransferHandler implements IEventHandler {
         to: args.to,
         value,
         valueFormatted,
-        isLargeTransfer,
+        isLargeTransfer: isLargeTransferResult,
         contractInfo,
       };
     } catch (error) {
@@ -142,40 +154,15 @@ export class ERC20TransferHandler implements IEventHandler {
   }
 
   private formatTokenValue(value: string, decimals: number): string {
-    try {
-      const bigIntValue = BigInt(value);
-      const divisor = BigInt(10 ** decimals);
-      const formatted =
-        Number((bigIntValue * BigInt(1000000)) / divisor) / 1000000;
-
-      return formatted.toLocaleString('en-US', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 6,
-      });
-    } catch {
-      return value;
-    }
+    return formatTokenAmount(value, decimals);
   }
 
-  private isLargeTransfer(
+  private isLargeTransferCheck(
     value: string,
     decimals: number,
     isStablecoin: boolean,
   ): boolean {
-    try {
-      const bigIntValue = BigInt(value);
-      const divisor = BigInt(10 ** decimals);
-      const tokenAmount = Number(bigIntValue) / Number(divisor);
-
-      // Dynamic thresholds based on token type
-      if (isStablecoin) {
-        return tokenAmount >= 100_000; // 100k for stablecoins
-      }
-
-      return tokenAmount >= 1_000_000; // 1M for other tokens
-    } catch {
-      return false;
-    }
+    return isLargeTransfer(value, decimals, isStablecoin);
   }
 
   private async processERC20Transfer(
