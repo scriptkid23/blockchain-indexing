@@ -9,6 +9,12 @@ import { EventDispatcherService } from '../../core/event-dispatcher.service';
 import { ContractConfigService } from '../../services/contract-config.service';
 import { ContractConfig } from '../../schemas/contract-config.schema';
 
+interface EventFragment {
+  name: string;
+  signature: string;
+  topic: string;
+}
+
 export class EvmBlockScanListener implements IBlockchainListener {
   private readonly logger = new Logger(EvmBlockScanListener.name);
   private _isRunning = false;
@@ -17,14 +23,16 @@ export class EvmBlockScanListener implements IBlockchainListener {
   private readonly scanIntervalMs: number;
   private readonly blocksPerScan: number;
   private contractConfigs: ContractConfig[] = [];
-  private contractAddresses: Set<string> = new Set();
-  private eventSignatures: Set<string> = new Set();
+  private contractAddressesByAddress: Map<string, ContractConfig> = new Map();
+  private eventsByTopic: Map<string, EventFragment> = new Map();
   private contractRefreshTimer: NodeJS.Timeout | null = null;
-  private readonly contractRefreshInterval = 30000; // 30 seconds
-  private readonly batchSize = 3; // Process 3 contracts per batch
-  private readonly batchDelay = 500; // 500ms delay between batches
+  private readonly contractRefreshInterval = 600000; // 10 minutes - increased from 5 minutes
   private rpcRequestCount = 0;
   private lastCounterResetTime = Date.now();
+  private receiptCache: Map<string, ethers.TransactionReceipt> = new Map();
+  private blockCache: Map<number, ethers.Block> = new Map();
+  private readonly maxRetries = 3;
+  private readonly retryDelay = 1000; // 1 second
 
   constructor(
     private readonly chainId: number,
@@ -34,7 +42,7 @@ export class EvmBlockScanListener implements IBlockchainListener {
     private readonly contractConfigService: ContractConfigService,
   ) {
     this.scanIntervalMs = config.scanInterval || 5000; // Default 5 seconds
-    this.blocksPerScan = parseInt(process.env.BLOCKS_PER_SCAN || '50', 10); // Configurable batch size
+    this.blocksPerScan = parseInt(process.env.BLOCKS_PER_SCAN || '100', 10); // Tăng từ 50 lên 100 blocks per scan
   }
 
   async start(): Promise<void> {
@@ -102,41 +110,6 @@ export class EvmBlockScanListener implements IBlockchainListener {
     return this._isRunning;
   }
 
-  // Utility functions for batch processing
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  private chunks<T>(array: T[], chunkSize: number): T[][] {
-    const result: T[][] = [];
-    for (let i = 0; i < array.length; i += chunkSize) {
-      result.push(array.slice(i, i + chunkSize));
-    }
-    return result;
-  }
-
-  private async processBatches<T, R>(
-    items: T[],
-    processFn: (batch: T[]) => Promise<R[]>,
-    batchSize: number = this.batchSize,
-    delayMs: number = this.batchDelay,
-  ): Promise<R[]> {
-    let results: R[] = [];
-    const batches = this.chunks(items, batchSize);
-
-    for (let i = 0; i < batches.length; i++) {
-      const batchResults = await processFn(batches[i]);
-      results = [...results, ...batchResults];
-
-      // Add delay between batches (except after the last batch)
-      if (i < batches.length - 1) {
-        await this.sleep(delayMs);
-      }
-    }
-
-    return results;
-  }
-
   private trackRpcRequest(): void {
     this.rpcRequestCount++;
     const currentTime = Date.now();
@@ -149,6 +122,32 @@ export class EvmBlockScanListener implements IBlockchainListener {
     }
   }
 
+  private async retryRpcCall<T>(
+    fn: () => Promise<T>,
+    context: string,
+  ): Promise<T | null> {
+    for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (error) {
+        if (attempt === this.maxRetries) {
+          this.logger.error(
+            `❌ RPC call failed after ${this.maxRetries} attempts (${context}):`,
+            error,
+          );
+          return null;
+        }
+        this.logger.warn(
+          `⚠️ RPC call failed (${context}), attempt ${attempt}/${this.maxRetries}, retrying...`,
+        );
+        await new Promise((resolve) =>
+          setTimeout(resolve, this.retryDelay * attempt),
+        );
+      }
+    }
+    return null;
+  }
+
   private async loadContracts(): Promise<void> {
     try {
       this.contractConfigs =
@@ -156,19 +155,23 @@ export class EvmBlockScanListener implements IBlockchainListener {
           this.chainId,
         );
 
-      // Update contract addresses and event signatures sets for fast lookup
-      this.contractAddresses.clear();
-      this.eventSignatures.clear();
+      // Clear caches khi reload contracts
+      this.contractAddressesByAddress.clear();
+      this.eventsByTopic.clear();
+      this.receiptCache.clear();
+      this.blockCache.clear();
 
+      // Build maps cho fast lookup
       for (const config of this.contractConfigs) {
-        this.contractAddresses.add(config.address.toLowerCase());
-        for (const eventSig of config.events) {
-          this.eventSignatures.add(eventSig);
-        }
+        const address = config.address.toLowerCase();
+        this.contractAddressesByAddress.set(address, config);
+
+        // Parse events từ ABI thay vì dùng hardcoded signatures
+        this.parseEventsFromABI(config);
       }
 
       this.logger.log(
-        `Loaded ${this.contractConfigs.length} contracts for dynamic block scanning on chain ${this.chainId}`,
+        `Loaded ${this.contractConfigs.length} contracts, ${this.eventsByTopic.size} unique events for chain ${this.chainId}`,
       );
     } catch (error) {
       this.logger.error(
@@ -176,6 +179,31 @@ export class EvmBlockScanListener implements IBlockchainListener {
         error,
       );
       throw error;
+    }
+  }
+
+  private parseEventsFromABI(config: ContractConfig): void {
+    try {
+      const iface = new ethers.Interface(config.abi);
+      
+      // Parse tất cả events từ ABI
+      iface.forEachEvent((eventFragment) => {
+        const topic = eventFragment.topicHash;
+        
+        // Chỉ thêm nếu event này được enable trong config
+        if (config.events.includes(topic)) {
+          this.eventsByTopic.set(topic, {
+            name: eventFragment.name,
+            signature: eventFragment.format('sighash'),
+            topic: topic,
+          });
+        }
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Failed to parse events from ABI for ${config.symbol}:`,
+        error,
+      );
     }
   }
 
@@ -215,12 +243,19 @@ export class EvmBlockScanListener implements IBlockchainListener {
   private async scanForNewBlocks(): Promise<void> {
     try {
       this.trackRpcRequest();
-      const latestBlock = await this.provider.getBlockNumber();
+      const latestBlock = await this.retryRpcCall(
+        () => this.provider.getBlockNumber(),
+        'getBlockNumber',
+      );
 
-      if (latestBlock <= this.lastProcessedBlock) {
-        this.logger.debug(
-          `📊 No new blocks to process for chain ${this.chainId}. Latest: ${latestBlock}, Last processed: ${this.lastProcessedBlock}`,
-        );
+      if (!latestBlock || latestBlock <= this.lastProcessedBlock) {
+        if (!latestBlock) {
+          this.logger.warn(`⚠️ Failed to get latest block number for chain ${this.chainId}`);
+        } else {
+          this.logger.debug(
+            `📊 No new blocks to process for chain ${this.chainId}. Latest: ${latestBlock}, Last processed: ${this.lastProcessedBlock}`,
+          );
+        }
         return;
       }
 
@@ -262,7 +297,7 @@ export class EvmBlockScanListener implements IBlockchainListener {
         return;
       }
 
-      // Get all events from all contracts in the block range using batch processing
+      // Get all events using optimized getLogs approach
       const allEvents = await this.getAllContractEventsInRange(
         fromBlock,
         toBlock,
@@ -282,11 +317,8 @@ export class EvmBlockScanListener implements IBlockchainListener {
           this.logger.log(`  📋 ${eventName}: ${count}`);
         });
 
-        // Process each event
-        for (const event of allEvents) {
-          if (!this.isRunning()) break;
-          await this.processContractEvent(event);
-        }
+        // Batch process events thay vì từng cái một
+        await this.batchProcessEvents(allEvents);
       } else {
         this.logger.debug(
           `📭 No events found in blocks ${fromBlock}-${toBlock} for chain ${this.chainId}`,
@@ -313,137 +345,229 @@ export class EvmBlockScanListener implements IBlockchainListener {
     transactionIndex: number;
     contractConfig: ContractConfig;
   }>> {
-    const allEvents: any[] = [];
+    try {
+      // Build filter cho getLogs - query tất cả events cùng lúc
+      const addresses = Array.from(this.contractAddressesByAddress.keys());
+      const topics = Array.from(this.eventsByTopic.keys());
 
-    // Process contracts in batches to avoid rate limiting
-    await this.processBatches(
-      this.contractConfigs,
-      async (batchConfigs) => {
-        const contractPromises = batchConfigs.map(async (config) => {
-          try {
-            const contract = new ethers.Contract(
-              config.address,
-              config.abi,
-              this.provider,
-            );
-
-            // Get event names from config
-            const eventNames = this.getEventNamesFromConfig(config);
-
-            // Process events for this contract in batches
-            const contractEvents = await this.processBatches(
-              eventNames,
-              async (batchEventNames) => {
-                const eventPromises = batchEventNames.map(async (eventName) => {
-                  try {
-                    this.trackRpcRequest();
-                    const filter = (contract.filters as any)[eventName]?.();
-                    if (!filter) return [];
-
-                    const events = await contract.queryFilter(
-                      filter,
-                      fromBlock,
-                      toBlock,
-                    );
-
-                    return events.map((event) => ({
-                      eventName,
-                      blockNumber: event.blockNumber,
-                      transactionHash: event.transactionHash,
-                      args: this.decodeEventData(event, config, eventName),
-                      timestamp: 0, // Will be filled later
-                      logIndex: event.index,
-                      transactionIndex: event.transactionIndex,
-                      contractConfig: config,
-                    }));
-                  } catch (error) {
-                    this.logger.warn(
-                      `⚠️ Failed to query ${eventName} events for ${config.symbol}:`,
-                      error,
-                    );
-                    return [];
-                  }
-                });
-
-                return (await Promise.all(eventPromises)).flat();
-              },
-              2, // 2 events per batch
-              300, // 300ms delay
-            );
-
-            return contractEvents;
-          } catch (error) {
-            this.logger.error(
-              `❌ Failed to process contract ${config.symbol}:`,
-              error,
-            );
-            return [];
-          }
-        });
-
-        const batchResults = await Promise.all(contractPromises);
-        allEvents.push(...batchResults.flat());
-
+      if (addresses.length === 0 || topics.length === 0) {
         return [];
-      },
-      this.batchSize, // Use configured batch size
-      this.batchDelay, // Use configured delay
-    );
-
-    // Sort events by block number and log index
-    allEvents.sort((a, b) => {
-      if (a.blockNumber !== b.blockNumber) {
-        return a.blockNumber - b.blockNumber;
       }
-      return a.logIndex - b.logIndex;
-    });
 
-    // Get block timestamps in batches
-    const uniqueBlocks = [...new Set(allEvents.map((e) => e.blockNumber))];
-    const blockTimestamps = new Map<number, number>();
+      // Single RPC call thay vì N * M calls - với retry logic
+      this.trackRpcRequest();
+      const logs = await this.retryRpcCall(
+        () =>
+          this.provider.getLogs({
+            address: addresses,
+            topics: [topics], // topics[0] = event signature
+            fromBlock,
+            toBlock,
+          }),
+        `getLogs(${fromBlock}-${toBlock})`,
+      );
 
-    await this.processBatches(
-      uniqueBlocks,
-      async (batchBlocks) => {
-        const blockPromises = batchBlocks.map(async (blockNumber) => {
-          try {
-            this.trackRpcRequest();
-            const block = await this.provider.getBlock(blockNumber);
-            return { number: blockNumber, timestamp: block?.timestamp || 0 };
-          } catch (error) {
-            this.logger.warn(`⚠️ Failed to get block ${blockNumber}:`, error);
-            return { number: blockNumber, timestamp: 0 };
-          }
-        });
-
-        const blocks = await Promise.all(blockPromises);
-        blocks.forEach((block) => {
-          blockTimestamps.set(block.number, block.timestamp);
-        });
-
+      if (!logs) {
+        this.logger.warn(
+          `⚠️ Failed to get logs for blocks ${fromBlock}-${toBlock}`,
+        );
         return [];
-      },
-      5, // 5 blocks per batch
-      200, // 200ms delay
-    );
+      }
 
-    // Add timestamps to events
-    return allEvents.map((event) => ({
-      ...event,
-      timestamp: (blockTimestamps.get(event.blockNumber) || 0) * 1000,
-    }));
+      this.logger.debug(
+        `📥 Retrieved ${logs.length} raw logs from RPC for blocks ${fromBlock}-${toBlock}`,
+      );
+
+      // Parse và enrich logs
+      const parsedEvents = await this.parseAndEnrichLogs(logs);
+
+      // Sort by block number and log index
+      parsedEvents.sort((a, b) => {
+        if (a.blockNumber !== b.blockNumber) {
+          return a.blockNumber - b.blockNumber;
+        }
+        return a.logIndex - b.logIndex;
+      });
+
+      return parsedEvents;
+    } catch (error) {
+      this.logger.error(
+        `❌ Error getting logs for blocks ${fromBlock}-${toBlock}:`,
+        error,
+      );
+      return [];
+    }
   }
 
-  private getEventNamesFromConfig(config: ContractConfig): string[] {
-    // Parse event names from signature hashes
-    const knownEvents: { [key: string]: string } = {
-      '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef': 'Transfer',
-      '0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925': 'Approval',
-    };
+  private async parseAndEnrichLogs(logs: ethers.Log[]): Promise<Array<{
+    eventName: string;
+    blockNumber: number;
+    transactionHash: string;
+    args: any[];
+    timestamp: number;
+    logIndex: number;
+    transactionIndex: number;
+    contractConfig: ContractConfig;
+  }>> {
+    const events: any[] = [];
 
-    return config.events
-      .map((eventSig) => knownEvents[eventSig])
-      .filter(Boolean);
+    // Collect unique block numbers để fetch timestamps
+    const uniqueBlocks = new Set<number>();
+    logs.forEach((log) => uniqueBlocks.add(log.blockNumber));
+
+    // Batch get block timestamps with caching
+    await this.batchGetBlocks(Array.from(uniqueBlocks));
+
+    // Parse từng log
+    for (const log of logs) {
+      try {
+        const address = log.address.toLowerCase();
+        const topic = log.topics[0];
+
+        const contractConfig = this.contractAddressesByAddress.get(address);
+        const eventInfo = this.eventsByTopic.get(topic);
+
+        if (!contractConfig || !eventInfo) {
+          continue;
+        }
+
+        // Decode event args
+        const iface = new ethers.Interface(contractConfig.abi);
+        const parsed = iface.parseLog({
+          topics: log.topics,
+          data: log.data,
+        });
+
+        if (!parsed) continue;
+
+        const block = this.blockCache.get(log.blockNumber);
+        const timestamp = block ? block.timestamp * 1000 : 0;
+
+        events.push({
+          eventName: eventInfo.name,
+          blockNumber: log.blockNumber,
+          transactionHash: log.transactionHash,
+          args: Array.from(parsed.args),
+          timestamp,
+          logIndex: log.index,
+          transactionIndex: log.transactionIndex,
+          contractConfig,
+        });
+      } catch (error) {
+        this.logger.warn(
+          `⚠️ Failed to parse log at block ${log.blockNumber}:`,
+          error,
+        );
+      }
+    }
+
+    return events;
+  }
+
+  private async batchGetBlocks(blockNumbers: number[]): Promise<void> {
+    // Filter ra những blocks chưa có trong cache
+    const blocksToFetch = blockNumbers.filter(
+      (num) => !this.blockCache.has(num),
+    );
+
+    if (blocksToFetch.length === 0) return;
+
+    this.logger.debug(`📦 Fetching ${blocksToFetch.length} blocks for timestamps`);
+
+    // Tăng batch size từ 10 lên 20 để giảm số lần await
+    const BLOCK_BATCH_SIZE = 20;
+    for (let i = 0; i < blocksToFetch.length; i += BLOCK_BATCH_SIZE) {
+      const batch = blocksToFetch.slice(i, i + BLOCK_BATCH_SIZE);
+      
+      const blockPromises = batch.map(async (blockNumber) => {
+        this.trackRpcRequest();
+        const block = await this.retryRpcCall(
+          () => this.provider.getBlock(blockNumber),
+          `getBlock(${blockNumber})`,
+        );
+        if (block) {
+          this.blockCache.set(blockNumber, block);
+        }
+      });
+
+      await Promise.all(blockPromises);
+    }
+
+    // Tăng cache size từ 1000 lên 2000 để giảm cache eviction
+    if (this.blockCache.size > 2000) {
+      const entries = Array.from(this.blockCache.entries());
+      const toKeep = entries.slice(-1000); // Keep latest 1000
+      this.blockCache.clear();
+      toKeep.forEach(([key, value]) => this.blockCache.set(key, value));
+    }
+  }
+
+  private async batchProcessEvents(events: Array<{
+    eventName: string;
+    blockNumber: number;
+    transactionHash: string;
+    args: any[];
+    timestamp: number;
+    logIndex: number;
+    transactionIndex: number;
+    contractConfig: ContractConfig;
+  }>): Promise<void> {
+    if (events.length === 0) return;
+
+    // Collect unique transaction hashes
+    const uniqueTxHashes = [...new Set(events.map((e) => e.transactionHash))];
+
+    // Batch get receipts with caching - này sẽ populate receipt cache
+    await this.batchGetReceipts(uniqueTxHashes);
+
+    // Process events with cached receipts - tăng batch size từ 50 lên 100
+    const PROCESS_BATCH_SIZE = 100;
+    for (let i = 0; i < events.length; i += PROCESS_BATCH_SIZE) {
+      if (!this.isRunning()) break;
+      
+      const batch = events.slice(i, i + PROCESS_BATCH_SIZE);
+      const processPromises = batch.map((event) => this.processContractEvent(event));
+      
+      await Promise.all(processPromises);
+    }
+  }
+
+  private async batchGetReceipts(txHashes: string[]): Promise<void> {
+    // Filter receipts chưa có trong cache
+    const receiptsToFetch = txHashes.filter(
+      (hash) => !this.receiptCache.has(hash),
+    );
+
+    if (receiptsToFetch.length === 0) return;
+
+    this.logger.debug(`📥 Fetching ${receiptsToFetch.length} transaction receipts`);
+
+    // Tăng batch size từ 20 lên 30 để parallel requests tốt hơn
+    const RECEIPT_BATCH_SIZE = 30;
+    for (let i = 0; i < receiptsToFetch.length; i += RECEIPT_BATCH_SIZE) {
+      const batch = receiptsToFetch.slice(i, i + RECEIPT_BATCH_SIZE);
+      
+      const receiptPromises = batch.map(async (txHash) => {
+        this.trackRpcRequest();
+        const receipt = await this.retryRpcCall(
+          () => this.provider.getTransactionReceipt(txHash),
+          `getReceipt(${txHash.substring(0, 10)}...)`,
+        );
+        if (receipt !== null) {
+          this.receiptCache.set(txHash, receipt);
+        }
+      });
+
+      await Promise.all(receiptPromises);
+    }
+
+    // Tăng cache size từ 2000 lên 3000
+    if (this.receiptCache.size > 3000) {
+      const entries = Array.from(this.receiptCache.entries());
+      const toKeep = entries.slice(-1500); // Keep latest 1500
+      this.receiptCache.clear();
+      toKeep.forEach(([key, value]) => this.receiptCache.set(key, value));
+    }
   }
 
   private async processContractEvent(event: {
@@ -457,14 +581,14 @@ export class EvmBlockScanListener implements IBlockchainListener {
     contractConfig: ContractConfig;
   }): Promise<void> {
     try {
-      // Get transaction receipt for additional data
-      this.trackRpcRequest();
-      const receipt = await this.provider.getTransactionReceipt(
-        event.transactionHash,
-      );
+      // Get cached receipt (đã fetch trước đó trong batch)
+      const receipt = this.receiptCache.get(event.transactionHash);
+
       if (!receipt) {
+        // Không fallback fetch nữa - log warning và skip
+        // Receipt đáng lẽ đã được fetch trong batch
         this.logger.warn(
-          `Transaction receipt not found for ${event.transactionHash}`,
+          `⚠️ Receipt not in cache for ${event.transactionHash}, skipping event`,
         );
         return;
       }
@@ -490,7 +614,10 @@ export class EvmBlockScanListener implements IBlockchainListener {
           },
           event: {
             name: event.eventName,
-            signature: this.getEventSignature(event.eventName),
+            signature: this.getEventSignatureFromConfig(
+              event.eventName,
+              event.contractConfig,
+            ),
             args: this.formatEventArgs(
               event.eventName,
               event.args,
@@ -518,36 +645,16 @@ export class EvmBlockScanListener implements IBlockchainListener {
     }
   }
 
-  private getEventSignature(eventName: string): string {
-    const knownSignatures: { [key: string]: string } = {
-      Transfer: '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef',
-      Approval: '0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925',
-    };
-    return knownSignatures[eventName] || '';
-  }
-
-  // Legacy methods removed - now using batch processing approach
-
-  private decodeEventData(
-    event: ethers.Log,
-    contractConfig: ContractConfig,
+  private getEventSignatureFromConfig(
     eventName: string,
-  ): any[] {
+    config: ContractConfig,
+  ): string {
     try {
-      // Create interface for decoding
-      const iface = new ethers.Interface(contractConfig.abi);
-      const decoded = iface.parseLog({
-        topics: event.topics,
-        data: event.data,
-      });
-
-      return decoded ? Array.from(decoded.args) : [];
-    } catch (error) {
-      this.logger.warn(
-        `⚠️ Failed to decode ${eventName} event for ${contractConfig.name}:`,
-        error,
-      );
-      return [];
+      const iface = new ethers.Interface(config.abi);
+      const eventFragment = iface.getEvent(eventName);
+      return eventFragment ? eventFragment.topicHash : '';
+    } catch {
+      return '';
     }
   }
 
