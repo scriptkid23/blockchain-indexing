@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
-import { ConfigDataService } from './config-data.service';
+import { ConfigCacheService } from './config-cache.service';
 import { ChainConfigService } from '../services/chain-config.service';
 import { ContractConfigService } from '../services/contract-config.service';
 import { ChainConfig, ChainConfigSchema } from '../schemas/chain-config.schema';
@@ -13,7 +13,7 @@ import { ContractConfig, ContractConfigSchema } from '../schemas/contract-config
       { name: ContractConfig.name, schema: ContractConfigSchema },
     ]),
   ],
-  providers: [ConfigDataService, ChainConfigService, ContractConfigService],
-  exports: [ConfigDataService],
+  providers: [ConfigCacheService, ChainConfigService, ContractConfigService],
+  exports: [ConfigCacheService],
 })
 export class ConfigDataModule {}

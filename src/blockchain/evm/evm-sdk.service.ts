@@ -9,7 +9,7 @@ import {
 import { BlockchainConfigService } from '../config/blockchain.config';
 import { EventDispatcherService } from '../core/event-dispatcher.service';
 import { ContractConfigService } from '../services/contract-config.service';
-import { ConfigDataService } from '../config-data/config-data.service';
+import { ConfigCacheService } from '../config-data/config-cache.service';
 import { EvmWebSocketListener } from './listeners/evm-websocket.listener';
 import { EvmBlockScanListener } from './listeners/evm-block-scan.listener';
 
@@ -27,7 +27,7 @@ export class EvmSdkService implements IBlockchainSDK {
     private readonly configService: BlockchainConfigService,
     private readonly eventDispatcher: EventDispatcherService,
     private readonly contractConfigService: ContractConfigService,
-    private readonly configDataService: ConfigDataService,
+    private readonly configCacheService: ConfigCacheService,
   ) {
     this._chainId = chainId;
   }
@@ -125,7 +125,7 @@ export class EvmSdkService implements IBlockchainSDK {
           this.eventDispatcher,
           config,
           this.contractConfigService,
-          this.configDataService,
+          this.configCacheService,
         );
 
       case EventStrategy.BLOCK_SCAN:
@@ -139,7 +139,7 @@ export class EvmSdkService implements IBlockchainSDK {
           this.provider,
           this.eventDispatcher,
           this.contractConfigService,
-          this.configDataService,
+          this.configCacheService,
         );
 
       case EventStrategy.HYBRID:
@@ -151,7 +151,7 @@ export class EvmSdkService implements IBlockchainSDK {
             this.eventDispatcher,
             config,
             this.contractConfigService,
-            this.configDataService,
+            this.configCacheService,
           );
         } else if (this.provider) {
           return new EvmBlockScanListener(
@@ -159,7 +159,7 @@ export class EvmSdkService implements IBlockchainSDK {
             this.provider,
             this.eventDispatcher,
             this.contractConfigService,
-            this.configDataService,
+            this.configCacheService,
           );
         }
         throw new Error(

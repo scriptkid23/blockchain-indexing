@@ -22,7 +22,7 @@ import { BlockchainService } from './blockchain.service';
 // Database services
 import { ChainConfigService } from './services/chain-config.service';
 import { ContractConfigService } from './services/contract-config.service';
-import { ConfigDataService } from './config-data/config-data.service';
+import { ConfigCacheService } from './config-data/config-cache.service';
 
 // Seeders
 import { ChainConfigSeeder } from './seeders/chain-config.seeder';
@@ -84,7 +84,7 @@ export class BlockchainModule implements OnModuleInit {
     private readonly configService: BlockchainConfigService,
     private readonly eventDispatcher: EventDispatcherService,
     private readonly contractConfigService: ContractConfigService,
-    private readonly configDataService: ConfigDataService,
+    private readonly configCacheService: ConfigCacheService,
     private readonly chainConfigSeeder: ChainConfigSeeder,
     private readonly contractConfigSeeder: ContractConfigSeeder,
     private readonly erc20Handler: ERC20TransferHandler,
@@ -112,7 +112,7 @@ export class BlockchainModule implements OnModuleInit {
           this.configService,
           this.eventDispatcher,
           this.contractConfigService,
-          this.configDataService,
+          this.configCacheService,
         );
       },
     );

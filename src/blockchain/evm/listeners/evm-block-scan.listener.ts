@@ -6,7 +6,7 @@ import {
 } from '../../interfaces/blockchain.interface';
 import { EventDispatcherService } from '../../core/event-dispatcher.service';
 import { ContractConfigService } from '../../services/contract-config.service';
-import { ConfigDataService } from '../../config-data/config-data.service';
+import { ConfigCacheService } from '../../config-data/config-cache.service';
 import { ContractConfig } from '../../schemas/contract-config.schema';
 import { CACHE_CONFIG } from '../utils/cache.config';
 import { BLOCK_SCAN_CONFIG } from '../utils/block-scan.config';
@@ -40,7 +40,7 @@ export class EvmBlockScanListener implements IBlockchainListener {
     private readonly provider: ethers.Provider,
     private readonly eventDispatcher: EventDispatcherService,
     private readonly contractConfigService: ContractConfigService,
-    private readonly configDataService: ConfigDataService,
+    private readonly configCacheService: ConfigCacheService,
   ) {
     // scanIntervalMs will be initialized in start() method from configDataService
     this.scanIntervalMs = BLOCK_SCAN_CONFIG.scanIntervalMs;
@@ -62,7 +62,7 @@ export class EvmBlockScanListener implements IBlockchainListener {
 
     try {
       // Get scanInterval from chain config
-      const chainConfig = this.configDataService.getChainConfig(this.chainId);
+      const chainConfig = this.configCacheService.getChainConfig(this.chainId);
       if (chainConfig?.scanInterval) {
         this.scanIntervalMs = chainConfig.scanInterval;
       }
@@ -164,7 +164,7 @@ export class EvmBlockScanListener implements IBlockchainListener {
   private async loadContracts(): Promise<void> {
     try {
       this.contractConfigs =
-        await this.configDataService.getEnabledContractsByChain(this.chainId);
+        await this.configCacheService.getEnabledContractsByChain(this.chainId);
 
       // Clear caches khi reload contracts
       this.contractAddressesByAddress.clear();
@@ -234,7 +234,7 @@ export class EvmBlockScanListener implements IBlockchainListener {
   }
 
   private startContractRefreshTimer(): void {
-    // Refresh timer is now handled by ConfigDataService
+    // Refresh timer is now handled by ConfigCacheService
     // This timer is kept for backward compatibility but calls the service's refresh
     // The actual refresh interval is controlled by CONTRACT_REFRESH_INTERVAL env var
     const refreshInterval = parseInt(
@@ -246,8 +246,8 @@ export class EvmBlockScanListener implements IBlockchainListener {
       if (!this.isRunning()) return;
 
       try {
-        // Force refresh from ConfigDataService, then reload contracts
-        await this.configDataService.forceRefresh();
+        // Force refresh from ConfigCacheService, then reload contracts
+        await this.configCacheService.forceRefresh();
         await this.loadContracts();
         this.logger.debug(
           `Refreshed contracts for block scan on chain ${this.chainId}`,
