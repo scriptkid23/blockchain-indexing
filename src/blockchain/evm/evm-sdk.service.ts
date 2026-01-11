@@ -58,7 +58,7 @@ export class EvmSdkService implements IBlockchainSDK {
       this.provider = new ethers.FallbackProvider(
         providerConfigs,
         undefined,
-        { quorum: 2 },
+        { quorum: 1 },
       );
 
       // Test connection
