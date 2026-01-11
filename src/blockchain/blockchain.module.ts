@@ -4,10 +4,6 @@ import { MongooseModule } from '@nestjs/mongoose';
 // Schemas
 import { ChainConfig, ChainConfigSchema } from './schemas/chain-config.schema';
 import {
-  ContractData,
-  ContractDataSchema,
-} from './schemas/contract-data.schema';
-import {
   BlockchainEvent,
   BlockchainEventSchema,
 } from './schemas/blockchain-event.schema';
@@ -25,8 +21,8 @@ import { BlockchainService } from './blockchain.service';
 
 // Database services
 import { ChainConfigService } from './services/chain-config.service';
-import { ContractDataService } from './services/contract-data.service';
 import { ContractConfigService } from './services/contract-config.service';
+import { ConfigDataService } from './config-data/config-data.service';
 
 // Seeders
 import { ChainConfigSeeder } from './seeders/chain-config.seeder';
@@ -35,6 +31,7 @@ import { ContractConfigSeeder } from './seeders/contract-config.seeder';
 // Blockchain specific modules
 import { EvmModule } from './evm/evm.module';
 import { EvmSdkService } from './evm/evm-sdk.service';
+import { ConfigDataModule } from './config-data/config-data.module';
 
 // Event handlers
 import { ERC20TransferHandler } from './handlers/erc20-transfer.handler';
@@ -46,16 +43,15 @@ import { ChainType } from './interfaces/blockchain.interface';
   imports: [
     MongooseModule.forFeature([
       { name: ChainConfig.name, schema: ChainConfigSchema },
-      { name: ContractData.name, schema: ContractDataSchema },
       { name: BlockchainEvent.name, schema: BlockchainEventSchema },
       { name: ContractConfig.name, schema: ContractConfigSchema },
     ]),
     EvmModule,
+    ConfigDataModule,
   ],
   providers: [
     // Database services
     ChainConfigService,
-    ContractDataService,
     ContractConfigService,
     ChainConfigSeeder,
     ContractConfigSeeder,
@@ -73,7 +69,6 @@ import { ChainType } from './interfaces/blockchain.interface';
   exports: [
     // Database services
     ChainConfigService,
-    ContractDataService,
 
     // Core services
     BlockchainConfigService,
@@ -89,6 +84,7 @@ export class BlockchainModule implements OnModuleInit {
     private readonly configService: BlockchainConfigService,
     private readonly eventDispatcher: EventDispatcherService,
     private readonly contractConfigService: ContractConfigService,
+    private readonly configDataService: ConfigDataService,
     private readonly chainConfigSeeder: ChainConfigSeeder,
     private readonly contractConfigSeeder: ContractConfigSeeder,
     private readonly erc20Handler: ERC20TransferHandler,
@@ -116,6 +112,7 @@ export class BlockchainModule implements OnModuleInit {
           this.configService,
           this.eventDispatcher,
           this.contractConfigService,
+          this.configDataService,
         );
       },
     );

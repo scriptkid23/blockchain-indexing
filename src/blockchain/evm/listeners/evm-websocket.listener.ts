@@ -7,6 +7,7 @@ import {
 } from '../../interfaces/blockchain.interface';
 import { EventDispatcherService } from '../../core/event-dispatcher.service';
 import { ContractConfigService } from '../../services/contract-config.service';
+import { ConfigDataService } from '../../config-data/config-data.service';
 import { ContractConfig } from '../../schemas/contract-config.schema';
 
 interface ContractInstance {
@@ -30,6 +31,7 @@ export class EvmWebSocketListener implements IBlockchainListener {
     private readonly eventDispatcher: EventDispatcherService,
     private readonly config: ChainConfig,
     private readonly contractConfigService: ContractConfigService,
+    private readonly configDataService: ConfigDataService,
   ) {}
 
   async start(): Promise<void> {
@@ -96,9 +98,9 @@ export class EvmWebSocketListener implements IBlockchainListener {
 
   private async loadAndSetupContracts(): Promise<void> {
     try {
-      // Load enabled contracts for this chain from MongoDB
+      // Load enabled contracts for this chain from ConfigDataService (cached)
       const contractConfigs =
-        await this.contractConfigService.getEnabledContractsByChain(
+        await this.configDataService.getEnabledContractsByChain(
           this.chainId,
         );
 

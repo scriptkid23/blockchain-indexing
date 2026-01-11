@@ -3,14 +3,12 @@ import {
   ContractConfigService,
   CreateContractConfigDto,
 } from '../services/contract-config.service';
+import { AbiUtils } from '../evm/utils/abi-utils';
 
-// Transfer event signature: Transfer(address indexed from, address indexed to, uint256 value)
-const TRANSFER_EVENT_SIGNATURE =
-  '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
-
-// Approval event signature: Approval(address indexed owner, address indexed spender, uint256 value)
-const APPROVAL_EVENT_SIGNATURE =
-  '0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925';
+// Get ERC-20 event signatures using AbiUtils (no hardcoding!)
+// This dynamically generates signatures from event declarations
+const ERC20_EVENT_SIGNATURES = AbiUtils.getCommonERC20EventSignatures();
+const ERC20_EVENT_SIGNATURES_ARRAY = AbiUtils.getEventSignaturesByType('erc20');
 
 // Standard ERC-20 ABI for Transfer and Approval events
 const ERC20_EVENTS_ABI = [
@@ -51,119 +49,46 @@ export class ContractConfigSeeder {
   }
 
   private async seedMultiChainContracts(): Promise<void> {
-    const multiChainContracts: MultiChainContract[] = [
-      // USDT (Tether USD) - Multiple chains
-      {
-        name: 'Tether USD',
-        symbol: 'USDT',
-        type: 'erc20',
-        description: 'USDT stablecoin deployed across multiple chains',
-        metadata: {
-          decimals: 6, // Note: USDT uses 6 decimals on most chains
-          isStablecoin: true,
-          priority: 'high',
-          volume: 'very_high',
-          website: 'https://tether.to',
-          coingeckoId: 'tether',
-        },
-        deployments: [
-          { chainId: 1, address: '0xdac17f958d2ee523a2206206994597c13d831ec7', enabled: true }, // Ethereum
-          { chainId: 56, address: '0x55d398326f99059ff775485246999027b3197955', enabled: true }, // BSC
-          { chainId: 137, address: '0xc2132d05d31c914a87c6611c10748aeb04b58e8f', enabled: true }, // Polygon
-          { chainId: 42161, address: '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9', enabled: false }, // Arbitrum
-          { chainId: 10, address: '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58', enabled: false }, // Optimism
-        ],
+    // Simplified: Only Sepolia with single token
+    const contractConfig: CreateContractConfigDto = {
+      address: '0xF894E8f72ee3FF8f706C9ba744d3c49544C00c88',
+      chainId: 11155111, // Sepolia
+      name: 'Test Token',
+      symbol: 'TEST',
+      type: 'erc20',
+      events: ERC20_EVENT_SIGNATURES_ARRAY,
+      abi: ERC20_EVENTS_ABI,
+      enabled: true,
+      description: 'Test token on Sepolia testnet',
+      startBlock: 10019681, // Starting block for scanning
+      metadata: {
+        decimals: 18,
+        isStablecoin: false,
+        priority: 'medium',
       },
+    };
 
-      // USDC (USD Coin) - Multiple chains
-      {
-        name: 'USD Coin',
-        symbol: 'USDC',
-        type: 'erc20',
-        description: 'USDC stablecoin deployed across multiple chains',
-        metadata: {
-          decimals: 6,
-          isStablecoin: true,
-          priority: 'high',
-          volume: 'high',
-          website: 'https://www.centre.io',
-          coingeckoId: 'usd-coin',
-        },
-        deployments: [
-          { chainId: 1, address: '0xa0b86a33e6441b8331265c164b7a03ba0d5a2b3a', enabled: true }, // Ethereum
-          { chainId: 56, address: '0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d', enabled: true }, // BSC
-          { chainId: 137, address: '0x2791bca1f2de4661ed88a30c99a7a9449aa84174', enabled: true }, // Polygon
-          { chainId: 42161, address: '0xff970a61a04b1ca14834a43f5de4533ebddb5cc8', enabled: false }, // Arbitrum
-          { chainId: 10, address: '0x7f5c764cbc14f9669b88837ca1490cca17c31607', enabled: false }, // Optimism
-        ],
-      },
+    try {
+      const existing = await this.contractConfigService.findByAddress(
+        contractConfig.address,
+        contractConfig.chainId,
+      );
 
-      // WETH (Wrapped Ether) - Multiple chains
-      {
-        name: 'Wrapped Ether',
-        symbol: 'WETH',
-        type: 'erc20',
-        description: 'Wrapped Ether for DeFi compatibility',
-        metadata: {
-          decimals: 18,
-          isStablecoin: false,
-          priority: 'medium',
-          volume: 'high',
-          website: 'https://weth.io',
-          coingeckoId: 'weth',
-        },
-        deployments: [
-          { chainId: 1, address: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2', enabled: false }, // Ethereum
-          { chainId: 56, address: '0x2170ed0880ac9a755fd29b2688956bd959f933f8', enabled: false }, // BSC (ETH)
-          { chainId: 137, address: '0x7ceb23fd6c98e3e8f29bb3a4af1e8c6a6e0c9f9e', enabled: false }, // Polygon
-          { chainId: 42161, address: '0x82af49447d8a07e3bd95bd0d56f35241523fbab1', enabled: false }, // Arbitrum
-        ],
-      },
-
-      // DAI (Dai Stablecoin) - Multiple chains
-      {
-        name: 'Dai Stablecoin',
-        symbol: 'DAI',
-        type: 'erc20',
-        description: 'DAI decentralized stablecoin',
-        metadata: {
-          decimals: 18,
-          isStablecoin: true,
-          priority: 'medium',
-          volume: 'medium',
-          website: 'https://makerdao.com',
-          coingeckoId: 'dai',
-        },
-        deployments: [
-          { chainId: 1, address: '0x6b175474e89094c44da98b954eedeac495271d0f', enabled: false }, // Ethereum
-          { chainId: 56, address: '0x1af3f329e8be154074d8769d1ffa4ee058b1dbc3', enabled: false }, // BSC
-          { chainId: 137, address: '0x8f3cf7ad23cd3cadbd9735aff958023239c6a063', enabled: false }, // Polygon
-        ],
-      },
-
-      // SHIB (Shiba Inu) - Primarily Ethereum
-      {
-        name: 'Shiba Inu',
-        symbol: 'SHIB',
-        type: 'erc20',
-        description: 'Shiba Inu meme token',
-        metadata: {
-          decimals: 18,
-          isStablecoin: false,
-          priority: 'low',
-          volume: 'medium',
-          website: 'https://shibainu.com',
-          coingeckoId: 'shiba-inu',
-        },
-        deployments: [
-          { chainId: 1, address: '0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce', enabled: false }, // Ethereum
-        ],
-      },
-    ];
-
-    // Process each multi-chain contract
-    for (const multiChainContract of multiChainContracts) {
-      await this.processMultiChainContract(multiChainContract);
+      if (!existing) {
+        await this.contractConfigService.create(contractConfig);
+        this.logger.log(
+          `✅ Created: ${contractConfig.symbol} on Sepolia (${contractConfig.address})`,
+        );
+      } else {
+        this.logger.log(
+          `⏭️  Already exists: ${contractConfig.symbol} on Sepolia - skipping`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `❌ Error processing ${contractConfig.symbol} on Sepolia:`,
+        error,
+      );
     }
   }
 
@@ -177,10 +102,11 @@ export class ContractConfigSeeder {
         name: multiChainContract.name,
         symbol: multiChainContract.symbol,
         type: multiChainContract.type,
-        events: [TRANSFER_EVENT_SIGNATURE, APPROVAL_EVENT_SIGNATURE],
+        events: ERC20_EVENT_SIGNATURES_ARRAY, // Use AbiUtils instead of hardcoded signatures
         abi: ERC20_EVENTS_ABI,
         enabled: deployment.enabled,
         description: `${multiChainContract.description} (Chain ID: ${deployment.chainId})`,
+        startBlock: 10019681, // Starting block for scanning
         metadata: {
           ...multiChainContract.metadata,
           chainId: deployment.chainId,

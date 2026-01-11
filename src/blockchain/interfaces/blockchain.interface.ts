@@ -47,6 +47,16 @@ export interface IBlockchainSDK {
 }
 
 export interface IEventHandler {
-  handle(event: BlockchainEvent): Promise<void>;
+  /**
+   * Handle a batch of events. This is the preferred method for processing events
+   * as it allows for batch optimizations (bulk DB operations, caching, etc.)
+   * @param events Array of events to process
+   */
+  handleBatch(events: BlockchainEvent[]): Promise<void>;
+  
+  /**
+   * Check if this handler can handle a specific event
+   * @param event Event to check
+   */
   canHandle(event: BlockchainEvent): boolean;
 }

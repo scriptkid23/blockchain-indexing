@@ -3,11 +3,13 @@ import { ethers } from 'ethers';
 import {
   IBlockchainListener,
   BlockchainEvent,
-  ChainConfig,
 } from '../../interfaces/blockchain.interface';
 import { EventDispatcherService } from '../../core/event-dispatcher.service';
 import { ContractConfigService } from '../../services/contract-config.service';
+import { ConfigDataService } from '../../config-data/config-data.service';
 import { ContractConfig } from '../../schemas/contract-config.schema';
+import { CACHE_CONFIG } from '../utils/cache.config';
+import { BLOCK_SCAN_CONFIG } from '../utils/block-scan.config';
 
 interface EventFragment {
   name: string;
@@ -20,29 +22,34 @@ export class EvmBlockScanListener implements IBlockchainListener {
   private _isRunning = false;
   private scanInterval: NodeJS.Timeout | null = null;
   private lastProcessedBlock = 0;
-  private readonly scanIntervalMs: number;
+  private scanIntervalMs: number;
   private readonly blocksPerScan: number;
   private contractConfigs: ContractConfig[] = [];
   private contractAddressesByAddress: Map<string, ContractConfig> = new Map();
   private eventsByTopic: Map<string, EventFragment> = new Map();
   private contractRefreshTimer: NodeJS.Timeout | null = null;
-  private readonly contractRefreshInterval = 600000; // 10 minutes - increased from 5 minutes
   private rpcRequestCount = 0;
   private lastCounterResetTime = Date.now();
   private receiptCache: Map<string, ethers.TransactionReceipt> = new Map();
   private blockCache: Map<number, ethers.Block> = new Map();
-  private readonly maxRetries = 3;
-  private readonly retryDelay = 1000; // 1 second
+  private readonly maxRetries: number;
+  private readonly retryDelay: number;
 
   constructor(
     private readonly chainId: number,
     private readonly provider: ethers.JsonRpcProvider,
     private readonly eventDispatcher: EventDispatcherService,
-    private readonly config: ChainConfig,
     private readonly contractConfigService: ContractConfigService,
+    private readonly configDataService: ConfigDataService,
   ) {
-    this.scanIntervalMs = config.scanInterval || 5000; // Default 5 seconds
-    this.blocksPerScan = parseInt(process.env.BLOCKS_PER_SCAN || '100', 10); // Tăng từ 50 lên 100 blocks per scan
+    // scanIntervalMs will be initialized in start() method from configDataService
+    this.scanIntervalMs = BLOCK_SCAN_CONFIG.scanIntervalMs;
+    this.blocksPerScan = BLOCK_SCAN_CONFIG.blocksPerScan;
+    this.maxRetries = BLOCK_SCAN_CONFIG.maxRetries;
+    this.retryDelay = BLOCK_SCAN_CONFIG.retryDelay;
+    this.logger.log(
+      `Cache config initialized - Receipt: max=${CACHE_CONFIG.receipt.maxSize}, keep=${CACHE_CONFIG.receipt.keepSize} | Block: max=${CACHE_CONFIG.block.maxSize}, keep=${CACHE_CONFIG.block.keepSize}`,
+    );
   }
 
   async start(): Promise<void> {
@@ -54,6 +61,12 @@ export class EvmBlockScanListener implements IBlockchainListener {
     }
 
     try {
+      // Get scanInterval from chain config
+      const chainConfig = this.configDataService.getChainConfig(this.chainId);
+      if (chainConfig?.scanInterval) {
+        this.scanIntervalMs = chainConfig.scanInterval;
+      }
+
       // Load contracts and initialize
       await this.loadContracts();
 
@@ -151,9 +164,7 @@ export class EvmBlockScanListener implements IBlockchainListener {
   private async loadContracts(): Promise<void> {
     try {
       this.contractConfigs =
-        await this.contractConfigService.getEnabledContractsByChain(
-          this.chainId,
-        );
+        await this.configDataService.getEnabledContractsByChain(this.chainId);
 
       // Clear caches khi reload contracts
       this.contractAddressesByAddress.clear();
@@ -185,11 +196,11 @@ export class EvmBlockScanListener implements IBlockchainListener {
   private parseEventsFromABI(config: ContractConfig): void {
     try {
       const iface = new ethers.Interface(config.abi);
-      
+
       // Parse tất cả events từ ABI
       iface.forEachEvent((eventFragment) => {
         const topic = eventFragment.topicHash;
-        
+
         // Chỉ thêm nếu event này được enable trong config
         if (config.events.includes(topic)) {
           this.eventsByTopic.set(topic, {
@@ -223,10 +234,20 @@ export class EvmBlockScanListener implements IBlockchainListener {
   }
 
   private startContractRefreshTimer(): void {
+    // Refresh timer is now handled by ConfigDataService
+    // This timer is kept for backward compatibility but calls the service's refresh
+    // The actual refresh interval is controlled by CONTRACT_REFRESH_INTERVAL env var
+    const refreshInterval = parseInt(
+      process.env.CONTRACT_REFRESH_INTERVAL || '30000',
+      10,
+    );
+
     this.contractRefreshTimer = setInterval(async () => {
       if (!this.isRunning()) return;
 
       try {
+        // Force refresh from ConfigDataService, then reload contracts
+        await this.configDataService.forceRefresh();
         await this.loadContracts();
         this.logger.debug(
           `Refreshed contracts for block scan on chain ${this.chainId}`,
@@ -237,7 +258,7 @@ export class EvmBlockScanListener implements IBlockchainListener {
           error,
         );
       }
-    }, this.contractRefreshInterval);
+    }, refreshInterval);
   }
 
   private async scanForNewBlocks(): Promise<void> {
@@ -248,31 +269,85 @@ export class EvmBlockScanListener implements IBlockchainListener {
         'getBlockNumber',
       );
 
-      if (!latestBlock || latestBlock <= this.lastProcessedBlock) {
-        if (!latestBlock) {
-          this.logger.warn(`⚠️ Failed to get latest block number for chain ${this.chainId}`);
-        } else {
-          this.logger.debug(
-            `📊 No new blocks to process for chain ${this.chainId}. Latest: ${latestBlock}, Last processed: ${this.lastProcessedBlock}`,
-          );
-        }
+      if (!latestBlock) {
+        this.logger.warn(
+          `⚠️ Failed to get latest block number for chain ${this.chainId}`,
+        );
         return;
       }
 
-      const startBlock = this.lastProcessedBlock + 1;
+      if (this.contractConfigs.length === 0) {
+        this.logger.debug('📭 No contracts to monitor, skipping block scan');
+        return;
+      }
+
+      // Calculate effective start block for each contract
+      // Use latestBlockScanned if > 0, otherwise use startBlock
+      const contractStartBlocks = this.contractConfigs.map((config) => {
+        const effectiveStart =
+          this.contractConfigService.getEffectiveStartBlock(config);
+        return {
+          config,
+          effectiveStart,
+        };
+      });
+
+      // Find the minimum start block among all contracts
+      const minStartBlock = Math.min(
+        ...contractStartBlocks.map((c) => c.effectiveStart),
+        this.lastProcessedBlock + 1,
+      );
+
+      if (latestBlock < minStartBlock) {
+        this.logger.debug(
+          `📊 No new blocks to process for chain ${this.chainId}. Latest: ${latestBlock}, Min start: ${minStartBlock}`,
+        );
+        return;
+      }
+
+      const startBlock = Math.max(minStartBlock, this.lastProcessedBlock + 1);
       const endBlock = Math.min(
         latestBlock,
         startBlock + this.blocksPerScan - 1,
       );
+
+      // Validate block range: startBlock must be <= endBlock
+      if (startBlock > endBlock) {
+        this.logger.debug(
+          `📊 No new blocks to scan for chain ${this.chainId}. Start: ${startBlock}, End: ${endBlock}, Latest: ${latestBlock}`,
+        );
+        return;
+      }
+
+      // Ensure we have at least 1 block to scan
+      if (startBlock === endBlock && startBlock > latestBlock) {
+        this.logger.debug(
+          `📊 All blocks processed for chain ${this.chainId}. Latest: ${latestBlock}, Last processed: ${this.lastProcessedBlock}`,
+        );
+        return;
+      }
 
       this.logger.log(
         `🔍 Scanning blocks ${startBlock} to ${endBlock} for chain ${this.chainId} (${endBlock - startBlock + 1} blocks)`,
       );
 
       // Use efficient batch processing for event extraction
-      await this.processBlockRangeWithBatching(startBlock, endBlock);
+      // Returns list of contracts that were actually scanned in this range
+      const contractsScanned = await this.processBlockRangeWithBatching(
+        startBlock,
+        endBlock,
+        contractStartBlocks,
+      );
 
       this.lastProcessedBlock = endBlock;
+
+      // Update latestBlockScanned only for contracts that were actually scanned
+      if (contractsScanned && contractsScanned.length > 0) {
+        await this.updateLatestBlockScannedForContracts(
+          endBlock,
+          contractsScanned,
+        );
+      }
 
       if (endBlock < latestBlock) {
         this.logger.debug(
@@ -290,25 +365,59 @@ export class EvmBlockScanListener implements IBlockchainListener {
   private async processBlockRangeWithBatching(
     fromBlock: number,
     toBlock: number,
-  ): Promise<void> {
+    contractStartBlocks?: Array<{
+      config: ContractConfig;
+      effectiveStart: number;
+    }>,
+  ): Promise<ContractConfig[]> {
     try {
       if (this.contractConfigs.length === 0) {
-        this.logger.debug('📭 No contracts to monitor, skipping block range processing');
-        return;
+        this.logger.debug(
+          '📭 No contracts to monitor, skipping block range processing',
+        );
+        return [];
+      }
+
+      // Filter contracts that should be scanned in this range
+      // Include contracts where effectiveStart <= toBlock
+      // This ensures we scan contracts that have started by the end of this range
+      let contractsToScan: ContractConfig[] = [];
+      if (contractStartBlocks) {
+        contractsToScan = contractStartBlocks
+          .filter((c) => {
+            // Contract should be scanned if effectiveStart <= toBlock
+            // Even if effectiveStart > fromBlock, we still include it because
+            // getLogs will only return events from the contract's effectiveStart onwards
+            return c.effectiveStart <= toBlock;
+          })
+          .map((c) => c.config);
+      } else {
+        contractsToScan = this.contractConfigs;
+      }
+
+      if (contractsToScan.length === 0) {
+        this.logger.debug(
+          `📭 No contracts to scan in range ${fromBlock}-${toBlock} (all contracts start after ${toBlock} or after ${fromBlock})`,
+        );
+        return [];
       }
 
       // Get all events using optimized getLogs approach
       const allEvents = await this.getAllContractEventsInRange(
         fromBlock,
         toBlock,
+        contractsToScan,
       );
 
       if (allEvents.length > 0) {
         // Group events by type for logging
-        const eventTypes = allEvents.reduce((acc, event) => {
-          acc[event.eventName] = (acc[event.eventName] || 0) + 1;
-          return acc;
-        }, {} as Record<string, number>);
+        const eventTypes = allEvents.reduce(
+          (acc, event) => {
+            acc[event.eventName] = (acc[event.eventName] || 0) + 1;
+            return acc;
+          },
+          {} as Record<string, number>,
+        );
 
         this.logger.log(
           `🎯 Found ${allEvents.length} events in blocks ${fromBlock}-${toBlock}:`,
@@ -324,30 +433,47 @@ export class EvmBlockScanListener implements IBlockchainListener {
           `📭 No events found in blocks ${fromBlock}-${toBlock} for chain ${this.chainId}`,
         );
       }
+
+      // Return list of contracts that were actually scanned
+      return contractsToScan;
     } catch (error) {
       this.logger.error(
         `❌ Error processing block range ${fromBlock}-${toBlock} on chain ${this.chainId}:`,
         error,
       );
+      return [];
     }
   }
 
   private async getAllContractEventsInRange(
     fromBlock: number,
     toBlock: number,
-  ): Promise<Array<{
-    eventName: string;
-    blockNumber: number;
-    transactionHash: string;
-    args: any[];
-    timestamp: number;
-    logIndex: number;
-    transactionIndex: number;
-    contractConfig: ContractConfig;
-  }>> {
+    contractsToScan?: ContractConfig[],
+  ): Promise<
+    Array<{
+      eventName: string;
+      blockNumber: number;
+      transactionHash: string;
+      args: any[];
+      timestamp: number;
+      logIndex: number;
+      transactionIndex: number;
+      contractConfig: ContractConfig;
+    }>
+  > {
     try {
+      // Validate block range
+      if (fromBlock > toBlock) {
+        this.logger.warn(
+          `⚠️ Invalid block range: fromBlock (${fromBlock}) > toBlock (${toBlock}), skipping`,
+        );
+        return [];
+      }
+
       // Build filter cho getLogs - query tất cả events cùng lúc
-      const addresses = Array.from(this.contractAddressesByAddress.keys());
+      // If contractsToScan is provided, only scan those contracts
+      const contracts = contractsToScan || this.contractConfigs;
+      const addresses = contracts.map((c) => c.address.toLowerCase());
       const topics = Array.from(this.eventsByTopic.keys());
 
       if (addresses.length === 0 || topics.length === 0) {
@@ -399,16 +525,18 @@ export class EvmBlockScanListener implements IBlockchainListener {
     }
   }
 
-  private async parseAndEnrichLogs(logs: ethers.Log[]): Promise<Array<{
-    eventName: string;
-    blockNumber: number;
-    transactionHash: string;
-    args: any[];
-    timestamp: number;
-    logIndex: number;
-    transactionIndex: number;
-    contractConfig: ContractConfig;
-  }>> {
+  private async parseAndEnrichLogs(logs: ethers.Log[]): Promise<
+    Array<{
+      eventName: string;
+      blockNumber: number;
+      transactionHash: string;
+      args: any[];
+      timestamp: number;
+      logIndex: number;
+      transactionIndex: number;
+      contractConfig: ContractConfig;
+    }>
+  > {
     const events: any[] = [];
 
     // Collect unique block numbers để fetch timestamps
@@ -443,11 +571,29 @@ export class EvmBlockScanListener implements IBlockchainListener {
         const block = this.blockCache.get(log.blockNumber);
         const timestamp = block ? block.timestamp * 1000 : 0;
 
+        // Convert args properly to preserve BigInt/BigNumber values as strings
+        const args = parsed.args.map((arg: any) => {
+          // Handle BigInt values (ethers v6)
+          if (typeof arg === 'bigint') {
+            return arg.toString();
+          }
+          // Handle BigNumber values (ethers v5 or wrapped)
+          if (arg && typeof arg === 'object' && 'toString' in arg) {
+            return arg.toString();
+          }
+          // Handle addresses and other strings
+          if (typeof arg === 'string') {
+            return arg;
+          }
+          // Fallback: convert to string
+          return String(arg);
+        });
+
         events.push({
           eventName: eventInfo.name,
           blockNumber: log.blockNumber,
           transactionHash: log.transactionHash,
-          args: Array.from(parsed.args),
+          args: args,
           timestamp,
           logIndex: log.index,
           transactionIndex: log.transactionIndex,
@@ -472,13 +618,15 @@ export class EvmBlockScanListener implements IBlockchainListener {
 
     if (blocksToFetch.length === 0) return;
 
-    this.logger.debug(`📦 Fetching ${blocksToFetch.length} blocks for timestamps`);
+    this.logger.debug(
+      `📦 Fetching ${blocksToFetch.length} blocks for timestamps`,
+    );
 
     // Tăng batch size từ 10 lên 20 để giảm số lần await
     const BLOCK_BATCH_SIZE = 20;
     for (let i = 0; i < blocksToFetch.length; i += BLOCK_BATCH_SIZE) {
       const batch = blocksToFetch.slice(i, i + BLOCK_BATCH_SIZE);
-      
+
       const blockPromises = batch.map(async (blockNumber) => {
         this.trackRpcRequest();
         const block = await this.retryRpcCall(
@@ -493,25 +641,31 @@ export class EvmBlockScanListener implements IBlockchainListener {
       await Promise.all(blockPromises);
     }
 
-    // Tăng cache size từ 1000 lên 2000 để giảm cache eviction
-    if (this.blockCache.size > 2000) {
+    // Cleanup block cache if exceeds max size
+    if (this.blockCache.size > CACHE_CONFIG.block.maxSize) {
+      const oldSize = this.blockCache.size;
       const entries = Array.from(this.blockCache.entries());
-      const toKeep = entries.slice(-1000); // Keep latest 1000
+      const toKeep = entries.slice(-CACHE_CONFIG.block.keepSize);
       this.blockCache.clear();
       toKeep.forEach(([key, value]) => this.blockCache.set(key, value));
+      this.logger.debug(
+        `🧹 Block cache cleaned: ${oldSize} -> ${toKeep.length} entries kept`,
+      );
     }
   }
 
-  private async batchProcessEvents(events: Array<{
-    eventName: string;
-    blockNumber: number;
-    transactionHash: string;
-    args: any[];
-    timestamp: number;
-    logIndex: number;
-    transactionIndex: number;
-    contractConfig: ContractConfig;
-  }>): Promise<void> {
+  private async batchProcessEvents(
+    events: Array<{
+      eventName: string;
+      blockNumber: number;
+      transactionHash: string;
+      args: any[];
+      timestamp: number;
+      logIndex: number;
+      transactionIndex: number;
+      contractConfig: ContractConfig;
+    }>,
+  ): Promise<void> {
     if (events.length === 0) return;
 
     // Collect unique transaction hashes
@@ -520,15 +674,26 @@ export class EvmBlockScanListener implements IBlockchainListener {
     // Batch get receipts with caching - này sẽ populate receipt cache
     await this.batchGetReceipts(uniqueTxHashes);
 
-    // Process events with cached receipts - tăng batch size từ 50 lên 100
+    // Process events in batches and dispatch as batch
     const PROCESS_BATCH_SIZE = 100;
     for (let i = 0; i < events.length; i += PROCESS_BATCH_SIZE) {
       if (!this.isRunning()) break;
-      
+
       const batch = events.slice(i, i + PROCESS_BATCH_SIZE);
-      const processPromises = batch.map((event) => this.processContractEvent(event));
-      
-      await Promise.all(processPromises);
+
+      // Convert to BlockchainEvent objects
+      const blockchainEvents: BlockchainEvent[] = [];
+      for (const event of batch) {
+        const blockchainEvent = await this.buildBlockchainEvent(event);
+        if (blockchainEvent) {
+          blockchainEvents.push(blockchainEvent);
+        }
+      }
+
+      // Dispatch batch instead of individual events
+      if (blockchainEvents.length > 0) {
+        await this.eventDispatcher.dispatchBatch(blockchainEvents);
+      }
     }
   }
 
@@ -540,13 +705,15 @@ export class EvmBlockScanListener implements IBlockchainListener {
 
     if (receiptsToFetch.length === 0) return;
 
-    this.logger.debug(`📥 Fetching ${receiptsToFetch.length} transaction receipts`);
+    this.logger.debug(
+      `📥 Fetching ${receiptsToFetch.length} transaction receipts`,
+    );
 
     // Tăng batch size từ 20 lên 30 để parallel requests tốt hơn
     const RECEIPT_BATCH_SIZE = 30;
     for (let i = 0; i < receiptsToFetch.length; i += RECEIPT_BATCH_SIZE) {
       const batch = receiptsToFetch.slice(i, i + RECEIPT_BATCH_SIZE);
-      
+
       const receiptPromises = batch.map(async (txHash) => {
         this.trackRpcRequest();
         const receipt = await this.retryRpcCall(
@@ -561,16 +728,20 @@ export class EvmBlockScanListener implements IBlockchainListener {
       await Promise.all(receiptPromises);
     }
 
-    // Tăng cache size từ 2000 lên 3000
-    if (this.receiptCache.size > 3000) {
+    // Cleanup receipt cache if exceeds max size
+    if (this.receiptCache.size > CACHE_CONFIG.receipt.maxSize) {
+      const oldSize = this.receiptCache.size;
       const entries = Array.from(this.receiptCache.entries());
-      const toKeep = entries.slice(-1500); // Keep latest 1500
+      const toKeep = entries.slice(-CACHE_CONFIG.receipt.keepSize);
       this.receiptCache.clear();
       toKeep.forEach(([key, value]) => this.receiptCache.set(key, value));
+      this.logger.debug(
+        `🧹 Receipt cache cleaned: ${oldSize} -> ${toKeep.length} entries kept`,
+      );
     }
   }
 
-  private async processContractEvent(event: {
+  private async buildBlockchainEvent(event: {
     eventName: string;
     blockNumber: number;
     transactionHash: string;
@@ -579,18 +750,15 @@ export class EvmBlockScanListener implements IBlockchainListener {
     logIndex: number;
     transactionIndex: number;
     contractConfig: ContractConfig;
-  }): Promise<void> {
+  }): Promise<BlockchainEvent | null> {
     try {
-      // Get cached receipt (đã fetch trước đó trong batch)
       const receipt = this.receiptCache.get(event.transactionHash);
 
       if (!receipt) {
-        // Không fallback fetch nữa - log warning và skip
-        // Receipt đáng lẽ đã được fetch trong batch
         this.logger.warn(
           `⚠️ Receipt not in cache for ${event.transactionHash}, skipping event`,
         );
-        return;
+        return null;
       }
 
       // Create blockchain event
@@ -601,8 +769,6 @@ export class EvmBlockScanListener implements IBlockchainListener {
         eventType: 'contract_log',
         contractAddress: event.contractConfig.address,
         data: {
-          topics: [], // Will be filled if needed
-          data: '0x',
           logIndex: event.logIndex,
           transactionIndex: event.transactionIndex,
           gasUsed: receipt.gasUsed.toString(),
@@ -618,30 +784,19 @@ export class EvmBlockScanListener implements IBlockchainListener {
               event.eventName,
               event.contractConfig,
             ),
-            args: this.formatEventArgs(
-              event.eventName,
-              event.args,
-              event.contractConfig,
-            ),
+            args: this.formatEventArgs(event.args),
           },
         },
         timestamp: event.timestamp,
       };
 
-      this.logger.log(
-        `${event.contractConfig.symbol} ${event.eventName}: ${this.formatEventDisplay(
-          event.eventName,
-          event.args,
-          event.contractConfig,
-        )}`,
-      );
-
-      await this.eventDispatcher.dispatchEvent(blockchainEvent);
+      return blockchainEvent;
     } catch (error) {
       this.logger.error(
-        `❌ Error processing contract event for ${event.contractConfig.symbol}:`,
+        `❌ Error building blockchain event for ${event.contractConfig.symbol}:`,
         error,
       );
+      return null;
     }
   }
 
@@ -658,86 +813,36 @@ export class EvmBlockScanListener implements IBlockchainListener {
     }
   }
 
-  private formatEventArgs(
-    eventName: string,
-    args: any[],
-    config: ContractConfig,
-  ): any {
-    if (eventName === 'Transfer' && args.length >= 3) {
-      return {
-        from: args[0],
-        to: args[1],
-        value: args[2].toString(),
-        valueFormatted: this.formatTokenValue(args[2].toString(), config),
-        isLargeTransfer: this.isLargeTransfer(args[2].toString(), config),
-      };
-    }
-
-    if (eventName === 'Approval' && args.length >= 3) {
-      return {
-        owner: args[0],
-        spender: args[1],
-        value: args[2].toString(),
-        valueFormatted: this.formatTokenValue(args[2].toString(), config),
-      };
-    }
-
-    // Default: return raw args
+  private formatEventArgs(args: any[]): any {
     return args.map((arg) =>
       typeof arg === 'object' && arg.toString ? arg.toString() : arg,
     );
   }
 
-  private formatEventDisplay(
-    eventName: string,
-    args: any[],
-    config: ContractConfig,
-  ): string {
-    if (eventName === 'Transfer' && args.length >= 3) {
-      const formatted = this.formatTokenValue(args[2].toString(), config);
-      return `${args[0]} -> ${args[1]} | ${formatted} ${config.symbol}`;
-    }
-
-    if (eventName === 'Approval' && args.length >= 3) {
-      const formatted = this.formatTokenValue(args[2].toString(), config);
-      return `${args[0]} approved ${args[1]} for ${formatted} ${config.symbol}`;
-    }
-
-    return `${eventName} with ${args.length} arguments`;
-  }
-
-  private formatTokenValue(value: string, config: ContractConfig): string {
+  // Update latestBlockScanned for contracts that were actually scanned
+  private async updateLatestBlockScannedForContracts(
+    endBlock: number,
+    contractsScanned: ContractConfig[],
+  ): Promise<void> {
     try {
-      const decimals = config.metadata?.decimals || 18;
-      const bigIntValue = BigInt(value);
-      const divisor = BigInt(10 ** decimals);
-      const formatted =
-        Number((bigIntValue * BigInt(1000000)) / divisor) / 1000000;
+      // Update latestBlockScanned only for contracts that were actually scanned
+      const updatePromises = contractsScanned.map((config) =>
+        this.contractConfigService.updateLatestBlockScanned(
+          config.address,
+          config.chainId,
+          endBlock,
+        ),
+      );
 
-      return formatted.toLocaleString('en-US', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 6,
-      });
-    } catch {
-      return value;
-    }
-  }
-
-  private isLargeTransfer(value: string, config: ContractConfig): boolean {
-    try {
-      const decimals = config.metadata?.decimals || 18;
-      const bigIntValue = BigInt(value);
-      const divisor = BigInt(10 ** decimals);
-      const tokenAmount = Number(bigIntValue) / Number(divisor);
-
-      // Define large transfer thresholds based on token type
-      if (config.metadata?.isStablecoin) {
-        return tokenAmount >= 100_000; // 100k for stablecoins
-      }
-
-      return tokenAmount >= 1_000_000; // 1M for other tokens
-    } catch {
-      return false;
+      await Promise.all(updatePromises);
+      this.logger.debug(
+        `✅ Updated latestBlockScanned to ${endBlock} for ${updatePromises.length} contracts: ${contractsScanned.map((c) => c.symbol).join(', ')}`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `❌ Error updating latestBlockScanned for contracts:`,
+        error,
+      );
     }
   }
 

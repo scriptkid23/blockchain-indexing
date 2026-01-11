@@ -34,6 +34,12 @@ export class ContractConfig {
 
   @Prop({ type: Object })
   metadata?: any; // Additional contract metadata
+
+  @Prop({ default: 0 })
+  startBlock?: number; // Starting block for scanning this contract
+
+  @Prop({ default: 0 })
+  latestBlockScanned?: number; // Last block that was scanned for this contract
 }
 
 export const ContractConfigSchema =

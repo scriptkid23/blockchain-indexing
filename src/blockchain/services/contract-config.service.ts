@@ -17,6 +17,7 @@ export interface CreateContractConfigDto {
   enabled?: boolean;
   description?: string;
   metadata?: any;
+  startBlock?: number; // Starting block for scanning this contract
 }
 
 @Injectable()
@@ -176,5 +177,36 @@ export class ContractConfigService {
     const created = await this.contractConfigModel.insertMany(configs);
     this.logger.log(`Created ${created.length} contract configs`);
     return created;
+  }
+
+  // Update latestBlockScanned for a contract
+  async updateLatestBlockScanned(
+    address: string,
+    chainId: number,
+    blockNumber: number,
+  ): Promise<ContractConfig | null> {
+    const updated = await this.contractConfigModel
+      .findOneAndUpdate(
+        { address: address.toLowerCase(), chainId },
+        { latestBlockScanned: blockNumber },
+        { new: true },
+      )
+      .exec();
+
+    if (updated) {
+      this.logger.debug(
+        `Updated latestBlockScanned to ${blockNumber} for contract ${address} on chain ${chainId}`,
+      );
+    }
+
+    return updated;
+  }
+
+  // Get effective start block for a contract (latestBlockScanned if > 0, otherwise startBlock)
+  getEffectiveStartBlock(contract: ContractConfig): number {
+    if (contract.latestBlockScanned && contract.latestBlockScanned > 0) {
+      return contract.latestBlockScanned;
+    }
+    return contract.startBlock || 0;
   }
 }

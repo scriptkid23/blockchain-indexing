@@ -9,6 +9,7 @@ import {
 import { BlockchainConfigService } from '../config/blockchain.config';
 import { EventDispatcherService } from '../core/event-dispatcher.service';
 import { ContractConfigService } from '../services/contract-config.service';
+import { ConfigDataService } from '../config-data/config-data.service';
 import { EvmWebSocketListener } from './listeners/evm-websocket.listener';
 import { EvmBlockScanListener } from './listeners/evm-block-scan.listener';
 
@@ -26,6 +27,7 @@ export class EvmSdkService implements IBlockchainSDK {
     private readonly configService: BlockchainConfigService,
     private readonly eventDispatcher: EventDispatcherService,
     private readonly contractConfigService: ContractConfigService,
+    private readonly configDataService: ConfigDataService,
   ) {
     this._chainId = chainId;
   }
@@ -108,6 +110,7 @@ export class EvmSdkService implements IBlockchainSDK {
           this.eventDispatcher,
           config,
           this.contractConfigService,
+          this.configDataService,
         );
 
       case EventStrategy.BLOCK_SCAN:
@@ -120,8 +123,8 @@ export class EvmSdkService implements IBlockchainSDK {
           this.chainId,
           this.provider,
           this.eventDispatcher,
-          config,
           this.contractConfigService,
+          this.configDataService,
         );
 
       case EventStrategy.HYBRID:
@@ -133,14 +136,15 @@ export class EvmSdkService implements IBlockchainSDK {
             this.eventDispatcher,
             config,
             this.contractConfigService,
+            this.configDataService,
           );
         } else if (this.provider) {
           return new EvmBlockScanListener(
             this.chainId,
             this.provider,
             this.eventDispatcher,
-            config,
             this.contractConfigService,
+            this.configDataService,
           );
         }
         throw new Error(
