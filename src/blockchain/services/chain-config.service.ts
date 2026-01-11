@@ -81,7 +81,7 @@ export class ChainConfigService {
       chainId: dbConfig.chainId,
       name: dbConfig.name,
       type: dbConfig.type as ChainType,
-      rpcUrl: dbConfig.rpcUrl,
+      rpcUrls: dbConfig.rpcUrls,
       wsUrl: dbConfig.wsUrl,
       strategy: dbConfig.strategy as EventStrategy,
       scanInterval: dbConfig.scanInterval,

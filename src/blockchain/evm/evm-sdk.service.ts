@@ -18,7 +18,7 @@ export class EvmSdkService implements IBlockchainSDK {
   private readonly logger = new Logger(EvmSdkService.name);
   public readonly chainType = ChainType.EVM;
 
-  private provider: ethers.JsonRpcProvider | null = null;
+  private provider: ethers.FallbackProvider | null = null;
   private wsProvider: ethers.WebSocketProvider | null = null;
   private _chainId: number;
 
@@ -43,11 +43,27 @@ export class EvmSdkService implements IBlockchainSDK {
     }
 
     try {
-      // Initialize HTTP provider
-      this.provider = new ethers.JsonRpcProvider(config.rpcUrl);
+      // Initialize HTTP provider(s) with fallback support
+      if (!config.rpcUrls || config.rpcUrls.length === 0) {
+        throw new Error(`No rpcUrls configured for chain ${this.chainId}`);
+      }
+      const providerConfigs = config.rpcUrls.map((url, idx) => ({
+        provider: new ethers.JsonRpcProvider(url),
+        priority: idx + 1,
+        stallTimeout: 750,
+        weight: 1,
+      }));
+
+      // Use quorum=1 so a single healthy endpoint is enough to proceed
+      this.provider = new ethers.FallbackProvider(
+        providerConfigs,
+        undefined,
+        { quorum: 2 },
+      );
 
       // Test connection
-      const network = await this.provider.getNetwork();
+      const provider = this.provider;
+      const network = await provider.getNetwork();
       if (Number(network.chainId) !== this.chainId) {
         throw new Error(
           `Chain ID mismatch: expected ${this.chainId}, got ${network.chainId}`,
@@ -84,7 +100,6 @@ export class EvmSdkService implements IBlockchainSDK {
     }
 
     if (this.provider) {
-      this.provider.destroy();
       this.provider = null;
     }
 
@@ -172,7 +187,7 @@ export class EvmSdkService implements IBlockchainSDK {
     }
   }
 
-  getProvider(): ethers.JsonRpcProvider | null {
+  getProvider(): ethers.FallbackProvider | null {
     return this.provider;
   }
 

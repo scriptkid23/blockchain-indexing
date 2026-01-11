@@ -52,9 +52,14 @@ export class ChainConfigSeeder {
         name: 'Ethereum testnet Sepolia',
         symbol: 'TETHSPL',
         type: 'evm',
-        rpcUrl:
+        rpcUrls: (
+          process.env.ETH_SEPOLIA_RPC_URLS ||
           process.env.ETH_SEPOLIA_RPC_URL ||
-          'https://sepolia.infura.io/v3/YOUR_PROJECT_ID',
+          'https://ethereum-sepolia-rpc.publicnode.com,https://api.zan.top/eth-sepolia,https://ethereum-sepolia.gateway.tatum.io,https://eth-sepolia-testnet.api.pocket.network'
+        )
+          .split(',')
+          .map((url) => url.trim())
+          .filter((url) => !!url),
         wsUrl:
           process.env.ETH_SEPOLIA_WS_URL ||
           'wss://sepolia.infura.io/ws/v3/YOUR_PROJECT_ID',

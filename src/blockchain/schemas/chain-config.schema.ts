@@ -17,8 +17,8 @@ export class ChainConfig {
   @Prop({ required: true, enum: ['evm', 'solana', 'sui'] })
   type: string;
 
-  @Prop({ required: true })
-  rpcUrl: string;
+  @Prop({ type: [String], required: true })
+  rpcUrls: string[];
 
   @Prop()
   wsUrl?: string;

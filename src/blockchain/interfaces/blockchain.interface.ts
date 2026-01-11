@@ -14,7 +14,7 @@ export interface ChainConfig {
   chainId: number;
   name: string;
   type: ChainType;
-  rpcUrl: string;
+  rpcUrls: string[];
   wsUrl?: string;
   strategy: EventStrategy;
   scanInterval?: number;

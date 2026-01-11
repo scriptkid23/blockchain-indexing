@@ -37,7 +37,7 @@ export class EvmBlockScanListener implements IBlockchainListener {
 
   constructor(
     private readonly chainId: number,
-    private readonly provider: ethers.JsonRpcProvider,
+    private readonly provider: ethers.Provider,
     private readonly eventDispatcher: EventDispatcherService,
     private readonly contractConfigService: ContractConfigService,
     private readonly configDataService: ConfigDataService,
