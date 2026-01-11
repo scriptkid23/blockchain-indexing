@@ -4,7 +4,6 @@ import {
   EventStrategy,
   IBlockchainSDK,
 } from '../interfaces/blockchain.interface';
-import { EventDispatcherService } from './event-dispatcher.service';
 
 @Injectable()
 export class ListenerFactoryService {
@@ -12,7 +11,7 @@ export class ListenerFactoryService {
   private readonly activeListeners: Map<string, IBlockchainListener> =
     new Map();
 
-  constructor(private readonly eventDispatcher: EventDispatcherService) {}
+  constructor() {}
 
   async createListener(
     sdk: IBlockchainSDK,

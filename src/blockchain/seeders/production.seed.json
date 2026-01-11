@@ -1,0 +1,24 @@
+{
+  "chains": [
+    {
+      "chainId": 1,
+      "name": "Ethereum mainnet",
+      "symbol": "ETH",
+      "type": "evm",
+      "rpcUrls": [
+        "https://mainnet.infura.io/v3/YOUR_PROJECT_ID"
+      ],
+      "wsUrl": "wss://mainnet.infura.io/ws/v3/YOUR_PROJECT_ID",
+      "strategy": "block_scan",
+      "enabled": false,
+      "isTestnet": false,
+      "explorerUrl": "https://etherscan.io",
+      "nativeCurrency": {
+        "name": "Ether",
+        "symbol": "ETH",
+        "decimals": 18
+      }
+    }
+  ],
+  "contracts": []
+}

@@ -4,7 +4,6 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { BlockchainModule } from './blockchain/blockchain.module';
-import { BlockchainService } from './blockchain/blockchain.service';
 
 @Module({
   imports: [
@@ -27,11 +26,4 @@ import { BlockchainService } from './blockchain/blockchain.service';
   controllers: [AppController],
   providers: [AppService],
 })
-export class AppModule implements OnModuleInit {
-  constructor(private blockchainService: BlockchainService) {}
-
-  async onModuleInit() {
-    // Initialize blockchain service (which will seed configurations)
-    await this.blockchainService.initialize();
-  }
-}
+export class AppModule {}

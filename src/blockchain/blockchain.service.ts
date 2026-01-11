@@ -3,26 +3,29 @@ import {
   Logger,
   OnModuleInit,
   OnModuleDestroy,
+  OnApplicationBootstrap,
 } from '@nestjs/common';
 import { SdkRegistryService } from './core/sdk-registry.service';
 import { ListenerFactoryService } from './core/listener-factory.service';
 import { BlockchainConfigService } from './config/blockchain.config';
-import { EventDispatcherService } from './core/event-dispatcher.service';
-import { ChainType, EventStrategy } from './interfaces/blockchain.interface';
+import { ChainType } from './interfaces/blockchain.interface';
+import { EvmSdkFactory } from './evm/evm-sdk.factory';
 import { ChainConfigSeeder } from './seeders/chain-config.seeder';
 import { ContractConfigSeeder } from './seeders/contract-config.seeder';
 
 @Injectable()
-export class BlockchainService implements OnModuleInit, OnModuleDestroy {
+export class BlockchainService
+  implements OnModuleInit, OnModuleDestroy, OnApplicationBootstrap
+{
   private readonly logger = new Logger(BlockchainService.name);
 
   constructor(
     private readonly sdkRegistry: SdkRegistryService,
     private readonly listenerFactory: ListenerFactoryService,
     private readonly configService: BlockchainConfigService,
-    private readonly eventDispatcher: EventDispatcherService,
     private readonly chainConfigSeeder: ChainConfigSeeder,
     private readonly contractConfigSeeder: ContractConfigSeeder,
+    private readonly evmSdkFactory: EvmSdkFactory,
   ) {}
 
   async onModuleInit() {
@@ -30,14 +33,20 @@ export class BlockchainService implements OnModuleInit, OnModuleDestroy {
     await this.initialize();
   }
 
+  async onApplicationBootstrap() {
+    // Start blockchain listeners after application is fully bootstrapped
+    // This ensures all event handlers are registered before we start listening
+    await this.startListeners();
+  }
+
   async initialize(): Promise<void> {
     // Seed database with chain and contract configurations
     await this.chainConfigSeeder.seed();
     await this.contractConfigSeeder.seed();
-    
-    // Start blockchain listeners
-    await this.startListeners();
-    
+
+    // Ensure SDK factories are registered
+    this.registerSdkFactories();
+
     this.logger.log('Blockchain service initialization complete');
   }
 
@@ -78,96 +87,14 @@ export class BlockchainService implements OnModuleInit, OnModuleDestroy {
     await this.listenerFactory.stopAllListeners();
   }
 
-  async restartListener(chainId: number): Promise<void> {
-    const config = this.configService.getChainConfig(chainId);
-    if (!config) {
-      throw new Error(`Configuration not found for chain ${chainId}`);
-    }
-
-    // Stop existing listener
-    await this.listenerFactory.stopListener(chainId, config.strategy);
-
-    // Start new listener
-    const sdk = await this.sdkRegistry.getSDK(chainId);
-    if (sdk) {
-      await this.listenerFactory.startListener(sdk, config.strategy);
-    }
-  }
-
-  getSystemStatus() {
-    const enabledConfigs = this.configService.getEnabledChainConfigs();
-    const activeListeners = this.listenerFactory.getActiveListeners();
-    const runningCount = this.listenerFactory.getRunningListenersCount();
-    const handlerCount = this.eventDispatcher.getHandlerCount();
-    const queueSize = this.eventDispatcher.getQueueSize();
-    const supportedChainTypes = this.sdkRegistry.getRegisteredChainTypes();
-
-    return {
-      enabled_chains: enabledConfigs.length,
-      active_listeners: activeListeners.length,
-      running_listeners: runningCount,
-      registered_handlers: handlerCount,
-      event_queue_size: queueSize,
-      supported_chain_types: supportedChainTypes,
-      chains: enabledConfigs.map((config) => ({
-        chain_id: config.chainId,
-        name: config.name,
-        type: config.type,
-        strategy: config.strategy,
-        is_running: this.listenerFactory.isListenerRunning(
-          config.chainId,
-          config.strategy,
-        ),
-        is_supported: this.sdkRegistry.isChainSupported(config.chainId),
-      })),
-    };
-  }
-
-  async switchStrategy(
-    chainId: number,
-    newStrategy: EventStrategy,
-  ): Promise<void> {
-    const config = this.configService.getChainConfig(chainId);
-    if (!config) {
-      throw new Error(`Configuration not found for chain ${chainId}`);
-    }
-
-    // Stop current listener
-    await this.listenerFactory.stopListener(chainId, config.strategy);
-
-    // Update strategy (in production, this should update persistent storage)
-    config.strategy = newStrategy;
-
-    // Start with new strategy
-    const sdk = await this.sdkRegistry.getSDK(chainId);
-    if (sdk) {
-      await this.listenerFactory.startListener(sdk, newStrategy);
-    }
-
-    this.logger.log(`Switched chain ${chainId} to ${newStrategy} strategy`);
-  }
-
-  async getChainStatus(chainId: number) {
-    const config = this.configService.getChainConfig(chainId);
-    if (!config) {
-      throw new Error(`Configuration not found for chain ${chainId}`);
-    }
-
-    const sdk = await this.sdkRegistry.getSDK(chainId);
-    const isRunning = this.listenerFactory.isListenerRunning(
-      chainId,
-      config.strategy,
+  /**
+   * Register SDK factories for supported chain types.
+   * Currently only EVM is implemented.
+   */
+  private registerSdkFactories() {
+    this.sdkRegistry.registerSDKFactory(
+      ChainType.EVM,
+      async (chainId: number) => this.evmSdkFactory.create(chainId),
     );
-
-    return {
-      chain_id: chainId,
-      name: config.name,
-      type: config.type,
-      strategy: config.strategy,
-      enabled: config.enabled,
-      is_running: isRunning,
-      is_connected: sdk ? true : false,
-      latest_block: sdk ? await sdk.getLatestBlock() : null,
-    };
   }
 }

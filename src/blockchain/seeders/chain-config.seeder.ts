@@ -5,6 +5,7 @@ import {
   ChainConfig,
   ChainConfigDocument,
 } from '../schemas/chain-config.schema';
+import * as seedData from './test.seed.json';
 
 @Injectable()
 export class ChainConfigSeeder {
@@ -45,30 +46,25 @@ export class ChainConfigSeeder {
   }
 
   private getChainConfigs(): Partial<ChainConfig>[] {
-    return [
-      // Ethereum Sepolia Testnet - Only this chain
-      {
-        chainId: 11155111,
-        name: 'Ethereum testnet Sepolia',
-        symbol: 'TETHSPL',
-        type: 'evm',
-        rpcUrls: (
-          process.env.ETH_SEPOLIA_RPC_URLS ||
-          process.env.ETH_SEPOLIA_RPC_URL ||
-          'https://ethereum-sepolia-rpc.publicnode.com,https://api.zan.top/eth-sepolia,https://ethereum-sepolia.gateway.tatum.io,https://eth-sepolia-testnet.api.pocket.network'
-        )
-          .split(',')
-          .map((url) => url.trim())
-          .filter((url) => !!url),
-        wsUrl:
-          process.env.ETH_SEPOLIA_WS_URL ||
-          'wss://sepolia.infura.io/ws/v3/YOUR_PROJECT_ID',
-        strategy: 'block_scan', // Use block_scan for testnet
-        enabled: true, // Enable Sepolia
-        isTestnet: true,
-        explorerUrl: 'https://sepolia.etherscan.io',
-        nativeCurrency: { name: 'Test Ether', symbol: 'ETH', decimals: 18 },
-      },
-    ];
+    const chains = (seedData as any).chains || [];
+
+    return chains.map((chain: any) => {
+      const rpcUrlsEnv =
+        process.env.ETH_SEPOLIA_RPC_URLS || process.env.ETH_SEPOLIA_RPC_URL;
+      const rpcUrls = rpcUrlsEnv
+        ? rpcUrlsEnv
+            .split(',')
+            .map((url) => url.trim())
+            .filter((url) => !!url)
+        : (chain.rpcUrls || []).map((url) => url.trim()).filter((url) => !!url);
+
+      const wsUrl = process.env.ETH_SEPOLIA_WS_URL || chain.wsUrl;
+
+      return {
+        ...chain,
+        rpcUrls,
+        wsUrl,
+      };
+    });
   }
 }

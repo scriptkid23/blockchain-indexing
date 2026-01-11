@@ -14,6 +14,6 @@ import { ContractConfig, ContractConfigSchema } from '../schemas/contract-config
     ]),
   ],
   providers: [ConfigCacheService, ChainConfigService, ContractConfigService],
-  exports: [ConfigCacheService],
+  exports: [ConfigCacheService, ChainConfigService, ContractConfigService],
 })
 export class ConfigDataModule {}
